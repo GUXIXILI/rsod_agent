@@ -22,6 +22,15 @@ build/
 venv/
 env/
 
+# ── 模型文件与训练产物 ───────────────────────────────
+*.pt
+*.pth
+*.pkl
+*.bin
+runs/
+datasets/
+yolo_dataset/
+
 # ── IDE ───────────────────────────────────────────
 .idea/
 .vscode/
