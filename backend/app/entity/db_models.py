@@ -6,6 +6,7 @@
   模型管理：training_tasks, training_metrics, model_versions
   智能体：  chat_sessions, chat_messages
   系统运维：operation_logs
+  交通监测：weather_data, traffic_data, road_hazard_predictions, hazard_alerts
 """
 from datetime import datetime
 from sqlalchemy import (
@@ -121,11 +122,21 @@ class DetectionScene(Base):
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="创建人")
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # 地理位置信息
+    latitude = Column(Float, nullable=True, comment="纬度")
+    longitude = Column(Float, nullable=True, comment="经度")
+    road_id = Column(String(100), nullable=True, comment="道路编号")
+    monitoring_type = Column(String(50), nullable=True, comment="监测点类型")
 
     # 关联
     detection_tasks = relationship("DetectionTask", back_populates="scene")
     model_versions = relationship("ModelVersion", back_populates="scene")
     training_tasks = relationship("TrainingTask", back_populates="scene")
+    weather_data = relationship("WeatherData", back_populates="scene", cascade="all, delete-orphan")
+    traffic_data = relationship("TrafficData", back_populates="scene", cascade="all, delete-orphan")
+    hazard_predictions = relationship("RoadHazardPrediction", back_populates="scene", cascade="all, delete-orphan")
+    hazard_alerts = relationship("HazardAlert", back_populates="scene", cascade="all, delete-orphan")
 
 
 class DetectionTask(Base):
@@ -211,6 +222,7 @@ class TrainingTask(Base):
 
     # 训练配置
     model_name = Column(String(50), default="yolov11n", comment="基础模型：yolov11n/s/m/l/x")
+    model_type = Column(String(20), default="yolo", comment="模型类型：yolo/xgboost/lstm")
     epochs = Column(Integer, default=100, comment="训练轮数")
     img_size = Column(Integer, default=640, comment="图像尺寸")
     batch_size = Column(Integer, default=16, comment="批次大小")
@@ -406,3 +418,79 @@ class RefreshToken(Base):
 
     # 关联
     user = relationship("User")
+
+
+# ══════════════════════════════════════════════════════════════
+# 七、交通监测
+# ══════════════════════════════════════════════════════════════
+
+class WeatherData(Base):
+    """气象数据表 — 记录各监测点的气象信息"""
+    __tablename__ = "weather_data"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监测位置/场景 ID")
+    timestamp = Column(DateTime, nullable=False, comment="数据采集时间")
+    temperature = Column(Float, nullable=True, comment="温度（℃）")
+    humidity = Column(Float, nullable=True, comment="湿度（%）")
+    precipitation = Column(Float, nullable=True, comment="降水量（mm）")
+    wind_speed = Column(Float, nullable=True, comment="风速（m/s）")
+    visibility = Column(Integer, nullable=True, comment="能见度（m）")
+    weather_condition = Column(String(50), nullable=True, comment="天气状况：sunny/cloudy/rainy/snowy/foggy")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+
+    # 关联
+    scene = relationship("DetectionScene", back_populates="weather_data")
+
+
+class TrafficData(Base):
+    """交通流量数据表 — 记录各监测点的交通流量信息"""
+    __tablename__ = "traffic_data"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监测位置/场景 ID")
+    timestamp = Column(DateTime, nullable=False, comment="数据采集时间")
+    vehicle_count = Column(Integer, nullable=True, comment="车辆数量")
+    avg_speed = Column(Float, nullable=True, comment="平均车速（km/h）")
+    vehicle_types = Column(JSON, nullable=True, comment="车辆类型分布，如 {\"car\":120,\"truck\":30,\"bus\":10}")
+    density = Column(Float, nullable=True, comment="车流密度（veh/km）")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+
+    # 关联
+    scene = relationship("DetectionScene", back_populates="traffic_data")
+
+
+class RoadHazardPrediction(Base):
+    """道路风险预测表 — 记录基于模型的道路风险预测结果"""
+    __tablename__ = "road_hazard_predictions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监测位置/场景 ID")
+    prediction_time = Column(DateTime, nullable=False, comment="预测时间")
+    horizon_minutes = Column(Integer, nullable=True, comment="预测时间范围（分钟）")
+    risk_level = Column(String(20), nullable=True, comment="风险等级：low/medium/high/critical")
+    risk_probability = Column(Float, nullable=True, comment="风险概率 0~1")
+    model_type = Column(String(20), nullable=True, comment="预测模型类型：xgboost/lstm/yolo")
+    feature_summary = Column(JSON, nullable=True, comment="特征摘要，如 {\"top_features\":[\"rain\",\"speed\"]}")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+
+    # 关联
+    scene = relationship("DetectionScene", back_populates="hazard_predictions")
+
+
+class HazardAlert(Base):
+    """危险预警表 — 记录道路危险预警信息"""
+    __tablename__ = "hazard_alerts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监测位置/场景 ID")
+    alert_level = Column(String(20), nullable=False, comment="预警等级：warning/danger/critical")
+    content = Column(Text, nullable=False, comment="预警内容")
+    channels = Column(JSON, nullable=True, comment="推送渠道，如 [\"sms\",\"email\",\"app_push\"]")
+    push_status = Column(String(20), default="pending", comment="推送状态：pending/sent/failed")
+    handled_status = Column(String(20), default="unhandled", comment="处理状态：unhandled/handling/resolved")
+    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+    handled_at = Column(DateTime, nullable=True, comment="处理时间")
+
+    # 关联
+    scene = relationship("DetectionScene", back_populates="hazard_alerts")

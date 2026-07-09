@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config.settings import settings
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
+from app.api.scenes import router as scenes_router
 from app.core.logger import setup_logging, get_logger
 from app.core.exceptions import register_exception_handlers
 from app.middleware.request_logger import RequestLogMiddleware
@@ -54,8 +55,14 @@ async def lifespan(_app: FastAPI):
     # 启动时执行
     print("正在初始化服务...")
     init_minio()
+    # 启动定时任务调度器
+    from app.scheduler import start_scheduler
+    start_scheduler()
     yield
     # 关闭时执行
+    # 停止定时任务调度器
+    from app.scheduler import stop_scheduler
+    stop_scheduler()
     print("服务已关闭")
 
 
@@ -90,6 +97,15 @@ app.add_middleware(RequestLogMiddleware)
 # ── 注册路由 ─────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(health_router)
+app.include_router(scenes_router)
+from app.api.training import router as training_router
+app.include_router(training_router)
+from app.api.weather import router as weather_router
+app.include_router(weather_router)
+from app.api.traffic import router as traffic_router
+app.include_router(traffic_router)
+from app.api.hazard import router as hazard_router
+app.include_router(hazard_router)
 
 
 @app.get("/")
@@ -104,4 +120,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
