@@ -526,3 +526,4 @@ class HazardAlertResponse(BaseModel):
     handled_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+    minio: Optional[str] = None

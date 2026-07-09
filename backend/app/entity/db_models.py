@@ -494,3 +494,4 @@ class HazardAlert(Base):
 
     # 关联
     scene = relationship("DetectionScene", back_populates="hazard_alerts")
+    user = relationship("User")
