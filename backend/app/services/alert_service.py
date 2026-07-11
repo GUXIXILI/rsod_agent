@@ -2,11 +2,11 @@
 火灾预警服务模块
 
 根据检测结果生成并分发火灾预警：
-- 火情等级为 warning/danger 时自动创建预警记录
+- 火情等级为 notice/warning/danger 时自动创建预警记录
 - 推送渠道占位（站内信/邮件/WebSocket），后续可扩展
 """
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -24,13 +24,13 @@ class AlertService:
         """
         根据检测结果创建火灾预警
 
-        仅当火情等级为 warning/danger 时生成预警。
-        safe/notice 级别不触发预警。
+        仅当火情等级为 notice/warning/danger 时生成预警。
+        safe 级别不触发预警。
         """
         from app.entity.db_models import FireAlert
 
         fire_level = fire_level_result.get("fire_level", "safe")
-        if fire_level not in ("warning", "danger"):
+        if fire_level not in ("notice", "warning", "danger"):
             logger.debug(
                 "火情等级为 %s，未达到预警阈值，跳过预警生成",
                 fire_level,
@@ -70,24 +70,22 @@ class AlertService:
 
     def _build_alert_content(self, task, fire_level_result: dict) -> str:
         """构建火灾预警内容文本"""
-        level_map = {
-            "warning": "警告",
-            "danger": "危险",
+        contents = {
+            "notice": "检测到疑似烟雾/火苗，请保持关注",
+            "warning": "检测到明显火情（warning）",
+            "danger": "检测到严重火情（danger）",
         }
-        level_text = level_map.get(fire_level_result.get("fire_level"), "异常")
-
-        return (
-            f"[{level_text}] 监控点 {task.scene_id} 检测到火情，"
-            f"火焰目标 {fire_level_result.get('fire_object_count', 0)} 个，"
-            f"烟雾目标 {fire_level_result.get('smoke_object_count', 0)} 个，"
-            f"火焰面积占比 {fire_level_result.get('fire_area', 0):.1%}。"
+        return contents.get(
+            fire_level_result.get("fire_level"),
+            f"监控点 {task.scene_id} 检测到异常火情",
         )
 
     def _build_suggestion(self, fire_level: str) -> str:
         """根据火情等级生成处置建议"""
         suggestions = {
-            "warning": "立即现场核实，准备灭火设备，必要时疏散周边人员",
-            "danger": "立即拨打119，启动消防喷淋，组织人员疏散，切断电源和燃气",
+            "notice": "安排人员现场复核，确认是否为初期火情。",
+            "warning": "立即启动现场核查，准备启动消防预案。",
+            "danger": "立即疏散人员并拨打119，启动消防设备。",
         }
         return suggestions.get(fire_level, "")
 
@@ -107,12 +105,21 @@ class AlertService:
         )
 
     def get_alerts(
-        self, db: Session, scene_id: Optional[int] = None, limit: int = 50
-    ):
-        """获取火灾预警列表，可按监控点筛选"""
-        from app.entity.db_models import FireAlert
+        self,
+        db: Session,
+        user_id: int,
+        scene_id: Optional[int] = None,
+        limit: int = 50,
+    ) -> List["FireAlert"]:
+        """获取火灾预警列表，按用户关联的检测任务过滤，可按监控点筛选"""
+        from app.entity.db_models import DetectionTask, FireAlert
 
-        query = db.query(FireAlert).order_by(FireAlert.created_at.desc())
+        query = (
+            db.query(FireAlert)
+            .join(DetectionTask, FireAlert.task_id == DetectionTask.id)
+            .filter(DetectionTask.user_id == user_id)
+            .order_by(FireAlert.created_at.desc())
+        )
         if scene_id is not None:
             query = query.filter(FireAlert.scene_id == scene_id)
         return query.limit(limit).all()

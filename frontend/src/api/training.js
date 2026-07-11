@@ -1,6 +1,14 @@
 import request from '@/utils/request'
 
 /**
+ * 获取活跃场景列表
+ * @returns {Promise} 活跃场景列表响应
+ */
+export const getActiveScenes = () => {
+  return request.get('/scenes')
+}
+
+/**
  * 启动训练
  * @param {Object} data - 训练配置信息
  * @returns {Promise} 训练启动响应

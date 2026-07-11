@@ -318,7 +318,7 @@ class TrainingService:
             # 加载预训练模型
             from ultralytics import YOLO
 
-            model_name = config.get("model_name", "yolo11n.pt")
+            model_name = config.get("model_name", "yolov11n.pt")
             model = YOLO(model_name)
             logger.info("预训练模型已加载: %s", model_name)
 

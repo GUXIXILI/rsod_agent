@@ -51,9 +51,9 @@ def get_history_task_detail(
     db: Session = Depends(get_db),
 ):
     """获取检测任务详情"""
-    detail = history_service.get_task_detail(db, task_id)
+    detail = history_service.get_task_detail(db, task_id, current_user.id)
     if not detail:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="检测任务不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="检测任务不存在或无权查看")
     return {"code": 200, "message": "success", "data": detail}
 
 

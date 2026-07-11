@@ -46,109 +46,128 @@ class DetectionService:
         image_size: int = 640,
     ) -> DetectionTask:
         """单图检测完整流程"""
-        # 1. 上传原图到 MinIO
         minio_client = MinIOClient()
         ext = filename.rsplit(".", 1)[-1] if "." in filename else "jpg"
         object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/{filename}"
-        original_url = minio_client.upload_bytes(image_file, object_name, f"image/{ext}")
+        original_url = None
+        try:
+            # 1. 上传原图到 MinIO
+            original_url = minio_client.upload_bytes(image_file, object_name, f"image/{ext}")
 
-        # 2. 加载场景默认模型
-        model = self._load_model(db, scene_id)
+            # 2. 加载场景默认模型
+            model = self._load_model(db, scene_id)
 
-        # 3. 执行推理
-        image = Image.open(io.BytesIO(image_file))
-        image_np = np.array(image)
-        results = model(image_np, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
+            # 3. 执行推理
+            image = Image.open(io.BytesIO(image_file))
+            image_np = np.array(image)
+            results = model(image_np, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
 
-        # 4. 绘制检测框并上传标注图
-        annotated_image = results[0].plot()
-        annotated_bytes = cv2.imencode(f".{ext}", annotated_image)[1].tobytes()
-        annotated_object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/annotated_{filename}"
-        annotated_url = minio_client.upload_bytes(annotated_bytes, annotated_object_name, f"image/{ext}")
+            # 4. 绘制检测框并上传标注图
+            annotated_image = results[0].plot()
+            annotated_bytes = cv2.imencode(f".{ext}", annotated_image)[1].tobytes()
+            annotated_object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/annotated_{filename}"
+            annotated_url = minio_client.upload_bytes(annotated_bytes, annotated_object_name, f"image/{ext}")
 
-        # 5. 创建 DetectionTask 记录
-        task = DetectionTask(
-            user_id=user_id,
-            scene_id=scene_id,
-            task_type="single",
-            file_name=filename,
-            original_url=original_url,
-            annotated_url=annotated_url,
-            status="completed",
-            image_width=image.width,
-            image_height=image.height,
-            detected_at=datetime.now(),
-        )
-        db.add(task)
-        db.flush()
-
-        # 6. 为每个检测目标创建 DetectionResult
-        fire_count = 0
-        smoke_count = 0
-        fire_area_sum = 0.0
-        smoke_area_sum = 0.0
-        image_area = image.width * image.height
-
-        for box in results[0].boxes:
-            cls_id = int(box.cls[0])
-            cls_name = model.names[cls_id]
-            xyxy = box.xyxy[0].tolist()
-            conf = float(box.conf[0])
-            x1, y1, x2, y2 = xyxy
-            w = x2 - x1
-            h = y2 - y1
-            area = w * h
-
-            result = DetectionResult(
-                task_id=task.id,
-                class_name=cls_name,
-                confidence=conf,
-                x_min=x1,
-                y_min=y1,
-                x_max=x2,
-                y_max=y2,
-                width=w,
-                height=h,
-                area=area,
+            # 5. 创建 DetectionTask 记录
+            task = DetectionTask(
+                user_id=user_id,
+                scene_id=scene_id,
+                task_type="single",
+                file_name=filename,
+                original_url=original_url,
+                annotated_url=annotated_url,
+                status="completed",
+                image_width=image.width,
+                image_height=image.height,
+                detected_at=datetime.now(),
             )
-            db.add(result)
+            db.add(task)
+            db.flush()
 
-            if cls_name == "fire":
-                fire_count += 1
-                fire_area_sum += area
-            elif cls_name == "smoke":
-                smoke_count += 1
-                smoke_area_sum += area
+            # 6. 为每个检测目标创建 DetectionResult
+            fire_count = 0
+            smoke_count = 0
+            fire_area_sum = 0.0
+            smoke_area_sum = 0.0
+            image_area = image.width * image.height
 
-        # 7. 火情等级判定
-        from app.services.fire_level_service import fire_level_service
-        fire_level_result = fire_level_service.judge(
-            fire_count=fire_count,
-            smoke_count=smoke_count,
-            fire_area=fire_area_sum / image_area if image_area > 0 else 0,
-            smoke_area=smoke_area_sum / image_area if image_area > 0 else 0,
-        )
+            for box in results[0].boxes:
+                cls_id = int(box.cls[0])
+                cls_name = model.names[cls_id]
+                xyxy = box.xyxy[0].tolist()
+                conf = float(box.conf[0])
+                x1, y1, x2, y2 = xyxy
+                w = x2 - x1
+                h = y2 - y1
+                area = w * h
 
-        # 8. 更新 task 火情字段
-        task.fire_level = fire_level_result["fire_level"]
-        task.risk_level = fire_level_result["fire_level"]
-        task.fire_area = fire_level_result["fire_area"]
-        task.smoke_area = fire_level_result["smoke_area"]
-        task.fire_object_count = fire_count
-        task.smoke_object_count = smoke_count
+                result = DetectionResult(
+                    task_id=task.id,
+                    class_name=cls_name,
+                    confidence=conf,
+                    x_min=x1,
+                    y_min=y1,
+                    x_max=x2,
+                    y_max=y2,
+                    width=w,
+                    height=h,
+                    area=area,
+                )
+                db.add(result)
 
-        db.commit()
-        db.refresh(task)
+                if cls_name == "fire":
+                    fire_count += 1
+                    fire_area_sum += area
+                elif cls_name == "smoke":
+                    smoke_count += 1
+                    smoke_area_sum += area
 
-        # 9. 生成火灾预警（若需要）
-        from app.services.alert_service import alert_service
-        alert_service.create_alert(db, task, fire_level_result)
+            # 7. 火情等级判定
+            from app.services.fire_level_service import fire_level_service
+            fire_level_result = fire_level_service.judge(
+                fire_count=fire_count,
+                smoke_count=smoke_count,
+                fire_area=fire_area_sum / image_area if image_area > 0 else 0,
+                smoke_area=smoke_area_sum / image_area if image_area > 0 else 0,
+            )
 
-        logger.info(
-            "单图检测完成: task_id=%s, fire_level=%s, fire_count=%d, smoke_count=%d",
-            task.id, task.fire_level, fire_count, smoke_count,
-        )
-        return task
+            # 8. 更新 task 火情字段
+            task.fire_level = fire_level_result["fire_level"]
+            task.risk_level = fire_level_result["fire_level"]
+            task.fire_area = fire_level_result["fire_area"]
+            task.smoke_area = fire_level_result["smoke_area"]
+            task.fire_object_count = fire_count
+            task.smoke_object_count = smoke_count
+
+            db.commit()
+            db.refresh(task)
+
+            # 9. 生成火灾预警（若需要）
+            from app.services.alert_service import alert_service
+            alert_service.create_alert(db, task, fire_level_result)
+
+            logger.info(
+                "单图检测完成: task_id=%s, fire_level=%s, fire_count=%d, smoke_count=%d",
+                task.id, task.fire_level, fire_count, smoke_count,
+            )
+            return task
+        except Exception as e:
+            logger.exception("单图检测失败: filename=%s, error=%s", filename, e)
+            error_task = DetectionTask(
+                user_id=user_id,
+                scene_id=scene_id,
+                task_type="single",
+                file_name=filename,
+                original_url=original_url,
+                annotated_url=None,
+                status="failed",
+                error_message=str(e),
+                detected_at=datetime.now(),
+            )
+            db.add(error_task)
+            db.commit()
+            db.refresh(error_task)
+            return error_task
 
     def detect_batch(
         self,
@@ -196,57 +215,69 @@ class DetectionService:
         temp_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path.write_bytes(video_bytes)
 
-        cap = cv2.VideoCapture(str(temp_path))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        # 创建输出视频
         output_path = temp_path.parent / f"output_{filename}"
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(str(output_path), fourcc, fps / max(frame_skip, 1), (width, height))
+        output_url = None
 
-        frame_idx = 0
-        fire_frames = []
-        smoke_frames = []
+        fps = 0.0
+        total_frames = 0
+        width = 0
+        height = 0
+        fire_frames: List[int] = []
+        smoke_frames: List[int] = []
         total_fire_count = 0
         total_smoke_count = 0
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame_idx += 1
+        try:
+            cap = cv2.VideoCapture(str(temp_path))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            if frame_idx % frame_skip != 0:
-                out.write(frame)
-                continue
+            # 创建输出视频
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out = cv2.VideoWriter(str(output_path), fourcc, fps / max(frame_skip, 1), (width, height))
 
-            results = model(frame, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
-            annotated_frame = results[0].plot()
-            out.write(annotated_frame)
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_idx += 1
 
-            for box in results[0].boxes:
-                cls_name = model.names[int(box.cls[0])]
-                if cls_name == "fire":
-                    fire_frames.append(frame_idx)
-                    total_fire_count += 1
-                elif cls_name == "smoke":
-                    smoke_frames.append(frame_idx)
-                    total_smoke_count += 1
+                if frame_idx % frame_skip != 0:
+                    out.write(frame)
+                    continue
 
-        cap.release()
-        out.release()
+                results = model(frame, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
+                annotated_frame = results[0].plot()
+                out.write(annotated_frame)
 
-        # 上传输出视频
-        output_bytes = output_path.read_bytes()
-        output_object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/output_{filename}"
-        output_url = minio_client.upload_bytes(output_bytes, output_object_name, f"video/{ext}")
+                for box in results[0].boxes:
+                    cls_name = model.names[int(box.cls[0])]
+                    if cls_name == "fire":
+                        fire_frames.append(frame_idx)
+                        total_fire_count += 1
+                    elif cls_name == "smoke":
+                        smoke_frames.append(frame_idx)
+                        total_smoke_count += 1
 
-        # 清理临时文件
-        os.remove(str(temp_path))
-        os.remove(str(output_path))
+            cap.release()
+            out.release()
+
+            # 上传输出视频
+            output_bytes = output_path.read_bytes()
+            output_object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/output_{filename}"
+            output_url = minio_client.upload_bytes(output_bytes, output_object_name, f"video/{ext}")
+        finally:
+            if 'cap' in locals():
+                cap.release()
+            if 'out' in locals():
+                out.release()
+            if temp_path.exists():
+                os.remove(str(temp_path))
+            if output_path.exists():
+                os.remove(str(output_path))
 
         # 火情等级判定
         from app.services.fire_level_service import fire_level_service
@@ -305,13 +336,17 @@ class DetectionService:
             .first()
         )
 
-        if model_version and model_version.model_path:
-            model = YOLO(model_version.model_path)
-        else:
-            # 使用 yolov11n 作为默认模型
-            model = YOLO("yolo11n.pt")
-
         with self._lock:
+            # 加锁后再次检查，避免并发重复加载
+            if scene_id in self._model_cache:
+                return self._model_cache[scene_id]
+
+            if model_version and model_version.model_path:
+                model = YOLO(model_version.model_path)
+            else:
+                # 使用 yolov11n 作为默认模型
+                model = YOLO("yolov11n.pt")
+
             self._model_cache[scene_id] = model
 
         logger.info("检测模型已加载: scene_id=%s", scene_id)

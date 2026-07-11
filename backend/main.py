@@ -63,9 +63,6 @@ async def lifespan(_app: FastAPI):
     # 停止定时任务调度器
     from app.scheduler import stop_scheduler
     stop_scheduler()
-    yield
-    # 关闭时执行
-    print("服务已关闭")
 
 
 # 创建 FastAPI 实例
@@ -113,8 +110,8 @@ app.include_router(stats_router)
 @app.get("/")
 def root():
     return {
-        "message": "欢迎使用 GLW RSOD Agent Platform",
-        "version": "0.1.0",
+        "message": "欢迎使用 GLW 火灾烟雾智能检测系统",
+        "version": "2.0.0",
         "docs": "/docs",
         "redoc": "/redoc",
     }
@@ -122,5 +119,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

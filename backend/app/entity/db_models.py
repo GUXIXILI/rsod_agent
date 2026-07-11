@@ -169,6 +169,15 @@ class DetectionTask(Base):
     smoke_object_count = Column(Integer, default=0, comment="烟雾目标数量")
     analyzed_at = Column(DateTime, nullable=True, comment="分析完成时间")
 
+    # 媒体文件信息（服务层写入）
+    file_name = Column(String(255), nullable=True, comment="原始文件名")
+    original_url = Column(String(500), nullable=True, comment="原始文件 URL")
+    annotated_url = Column(String(500), nullable=True, comment="标注结果文件 URL")
+    image_width = Column(Integer, nullable=True, comment="媒体宽度（像素）")
+    image_height = Column(Integer, nullable=True, comment="媒体高度（像素）")
+    video_duration = Column(Float, nullable=True, comment="视频时长（秒），图像时为空")
+    detected_at = Column(DateTime, nullable=True, comment="检测完成时间")
+
     created_at = Column(DateTime, default=datetime.now, index=True, comment="创建时间")
     completed_at = Column(DateTime, nullable=True, comment="完成时间")
 
@@ -194,6 +203,15 @@ class DetectionResult(Base):
     class_id = Column(Integer, nullable=False, comment="类别 ID")
     confidence = Column(Float, nullable=False, comment="置信度 0~1")
     bbox = Column(JSON, nullable=False, comment="边界框 [x1, y1, x2, y2]")
+
+    # 边界框坐标（服务层冗余写入，方便统计查询）
+    x_min = Column(Float, nullable=True, comment="边界框左上角 x 坐标")
+    y_min = Column(Float, nullable=True, comment="边界框左上角 y 坐标")
+    x_max = Column(Float, nullable=True, comment="边界框右下角 x 坐标")
+    y_max = Column(Float, nullable=True, comment="边界框右下角 y 坐标")
+    width = Column(Integer, nullable=True, comment="边界框宽度（像素）")
+    height = Column(Integer, nullable=True, comment="边界框高度（像素）")
+    area = Column(Float, nullable=True, comment="边界框面积（像素）")
 
     # 图像级信息（冗余存储，方便查询）
     inference_time = Column(Float, nullable=True, comment="该图推理耗时（ms）")
@@ -442,4 +460,3 @@ class FireAlert(Base):
     # 关联
     scene = relationship("DetectionScene", back_populates="fire_alerts")
     task = relationship("DetectionTask")
-    user = relationship("User")

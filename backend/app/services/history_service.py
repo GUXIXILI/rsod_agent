@@ -67,9 +67,13 @@ class HistoryService:
             ],
         }
 
-    def get_task_detail(self, db: Session, task_id: int) -> Optional[dict]:
+    def get_task_detail(self, db: Session, task_id: int, user_id: int) -> Optional[dict]:
         """获取检测任务详情，包含所有检测结果"""
-        task = db.query(DetectionTask).filter(DetectionTask.id == task_id).first()
+        task = (
+            db.query(DetectionTask)
+            .filter(DetectionTask.id == task_id, DetectionTask.user_id == user_id)
+            .first()
+        )
         if not task:
             return None
 

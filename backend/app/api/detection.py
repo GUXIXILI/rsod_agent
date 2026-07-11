@@ -170,7 +170,9 @@ def get_fire_alerts(
 ):
     """获取火灾预警列表"""
     from app.services.alert_service import alert_service
-    alerts = alert_service.get_alerts(db, scene_id=scene_id, limit=limit)
+    alerts = alert_service.get_alerts(
+        db, user_id=current_user.id, scene_id=scene_id, limit=limit
+    )
     return {
         "code": 200,
         "message": "success",
