@@ -56,16 +56,16 @@ async def lifespan(_app: FastAPI):
     print("正在初始化服务...")
     init_minio()
     # 启动定时任务调度器
-    from app.scheduler import start_scheduler
+    from app.scheduler import start_scheduler, stop_scheduler
+
     start_scheduler()
-    yield
-    # 关闭时执行
-    # 停止定时任务调度器
-    from app.scheduler import stop_scheduler
-    stop_scheduler()
-    yield
-    # 关闭时执行
-    print("服务已关闭")
+    try:
+        yield
+    finally:
+        # 关闭时执行
+        # 停止定时任务调度器
+        stop_scheduler()
+        print("服务已关闭")
 
 
 # 创建 FastAPI 实例
