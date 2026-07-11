@@ -442,3 +442,4 @@ class FireAlert(Base):
     # 关联
     scene = relationship("DetectionScene", back_populates="fire_alerts")
     task = relationship("DetectionTask")
+    user = relationship("User")

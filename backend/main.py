@@ -63,6 +63,8 @@ async def lifespan(_app: FastAPI):
     # 停止定时任务调度器
     from app.scheduler import stop_scheduler
     stop_scheduler()
+    yield
+    # 关闭时执行
     print("服务已关闭")
 
 
@@ -119,3 +121,4 @@ def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
