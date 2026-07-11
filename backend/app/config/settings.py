@@ -65,15 +65,8 @@ class Settings(BaseSettings):
     TRAIN_OUTPUT_DIR: str = "runs/train"  # 训练输出目录（模型权重、日志等）
     DATASET_BASE_DIR: str = "datasets"    # 数据集根目录
 
-    # ── 天气数据配置 ──────────────────────────────────
-    WEATHER_API_KEY: str = ""             # 天气 API Key（可选，留空则使用模拟数据）
-    WEATHER_API_PROVIDER: str = "pyowm"  # 天气 API 提供商：openweathermap/pyowm
-
-    # ── 交通数据配置 ──────────────────────────────────
-    TRAFFIC_API_KEY: str = ""             # 交通 API Key（可选）
-
-    # ── 危险路况预测调度配置 ────────────────────────────
-    SCHEDULER_ENABLED: bool = True        # 是否启用定时任务拉取天气数据
+    # ── 定时任务配置 ──────────────────────────────────
+    SCHEDULER_ENABLED: bool = False       # 是否启用定时任务（如定时清理过期检测记录）
 
     # ── CORS 配置 ────────────────────────────────────
     ALLOWED_ORIGINS: str = (

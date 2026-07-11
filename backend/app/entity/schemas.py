@@ -131,16 +131,15 @@ class PermissionResponse(BaseModel):
 # --- 检测场景 ---
 class SceneCreate(BaseModel):
     """创建检测场景"""
-    name: str = Field(..., description="场景标识，如 remote_sensing")
-    display_name: str = Field(..., description="场景显示名，如 遥感目标检测")
+    name: str = Field(..., description="场景标识，如 fire_smoke")
+    display_name: str = Field(..., description="场景显示名，如 火灾烟雾检测")
     description: Optional[str] = None
-    category: str = Field(..., description="分类：agriculture/industry/remote_sensing/medical/traffic")
+    category: str = Field(..., description="分类：fire")
     class_names: list[str] = Field(..., description="类别列表")
     class_names_cn: Optional[dict[str, str]] = Field(None, description="中文名映射")
-    latitude: Optional[float] = Field(None, description="纬度")
-    longitude: Optional[float] = Field(None, description="经度")
-    road_id: Optional[str] = Field(None, description="道路编号")
-    monitoring_type: Optional[str] = Field(None, description="监测点类型")
+    location_type: Optional[str] = Field(None, description="监控点类型：warehouse/forest/factory/building/site")
+    address: Optional[str] = Field(None, description="监控点地址")
+    camera_count: Optional[int] = Field(1, description="摄像头数量")
 
 
 class SceneResponse(BaseModel):
@@ -153,10 +152,9 @@ class SceneResponse(BaseModel):
     class_names: list
     class_names_cn: Optional[dict] = None
     is_active: bool
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    road_id: Optional[str] = None
-    monitoring_type: Optional[str] = None
+    location_type: Optional[str] = None
+    address: Optional[str] = None
+    camera_count: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -230,7 +228,6 @@ class TrainingTaskCreate(BaseModel):
     """创建训练任务"""
     scene_id: int = Field(..., description="关联场景 ID")
     model_name: str = Field(default="yolov11n", description="基础模型")
-    model_type: Optional[str] = Field(default="yolo", description="模型类型：yolo/xgboost/lstm")
     epochs: int = Field(default=100, ge=10, le=500, description="训练轮数")
     img_size: int = Field(default=640, description="图像尺寸")
     batch_size: int = Field(default=16, ge=1, le=64, description="批次大小")
@@ -249,7 +246,6 @@ class TrainingTaskResponse(BaseModel):
     task_uuid: str
     status: str
     model_name: str
-    model_type: str
     epochs: int
     current_epoch: int
     progress: int
@@ -439,91 +435,37 @@ class HealthResponse(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════
-# 七、交通监测
+# 七、火灾检测相关
 # ══════════════════════════════════════════════════════════════
 
-# --- 气象数据 ---
-class WeatherDataCreate(BaseModel):
-    """创建气象数据记录"""
-    location_id: int = Field(..., description="监测位置/场景 ID")
-    timestamp: datetime = Field(..., description="数据采集时间")
-    temperature: Optional[float] = Field(None, description="温度（℃）")
-    humidity: Optional[float] = Field(None, description="湿度（%）")
-    precipitation: Optional[float] = Field(None, description="降水量（mm）")
-    wind_speed: Optional[float] = Field(None, description="风速（m/s）")
-    visibility: Optional[int] = Field(None, description="能见度（m）")
-    weather_condition: Optional[str] = Field(None, description="天气状况：sunny/cloudy/rainy/snowy/foggy")
+class DetectionRequest(BaseModel):
+    """检测请求"""
+    scene_id: int = Field(..., description="场景 ID")
+    model_version_id: Optional[int] = Field(None, description="模型版本 ID，为空则用默认模型")
+    conf_threshold: float = Field(0.25, description="置信度阈值")
+    iou_threshold: float = Field(0.45, description="NMS 阈值")
+    image_size: int = Field(640, description="推理图像尺寸")
 
 
-class WeatherDataResponse(BaseModel):
-    """气象数据响应"""
+class FireLevelResult(BaseModel):
+    """火情判定结果"""
+    fire_level: str
+    fire_area: float
+    smoke_area: float
+    fire_object_count: int
+    smoke_object_count: int
+    suggestion: Optional[str] = None
+
+
+class FireAlertResponse(BaseModel):
+    """火灾预警响应"""
     id: int
-    location_id: int
-    timestamp: datetime
-    temperature: Optional[float] = None
-    humidity: Optional[float] = None
-    precipitation: Optional[float] = None
-    wind_speed: Optional[float] = None
-    visibility: Optional[int] = None
-    weather_condition: Optional[str] = None
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-# --- 交通流量数据 ---
-class TrafficDataCreate(BaseModel):
-    """创建交通流量数据记录"""
-    location_id: int = Field(..., description="监测位置/场景 ID")
-    timestamp: datetime = Field(..., description="数据采集时间")
-    vehicle_count: Optional[int] = Field(None, description="车辆数量")
-    avg_speed: Optional[float] = Field(None, description="平均车速（km/h）")
-    vehicle_types: Optional[dict] = Field(None, description="车辆类型分布")
-    density: Optional[float] = Field(None, description="车流密度（veh/km）")
-
-
-class TrafficDataResponse(BaseModel):
-    """交通流量数据响应"""
-    id: int
-    location_id: int
-    timestamp: datetime
-    vehicle_count: Optional[int] = None
-    avg_speed: Optional[float] = None
-    vehicle_types: Optional[dict] = None
-    density: Optional[float] = None
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-# --- 道路风险预测 ---
-class RoadHazardPredictionResponse(BaseModel):
-    """道路风险预测响应"""
-    id: int
-    location_id: int
-    prediction_time: datetime
-    horizon_minutes: Optional[int] = None
-    risk_level: Optional[str] = None
-    risk_probability: Optional[float] = None
-    model_type: Optional[str] = None
-    feature_summary: Optional[dict] = None
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-# --- 危险预警 ---
-class HazardAlertResponse(BaseModel):
-    """危险预警响应"""
-    id: int
-    location_id: int
-    alert_level: str
+    task_id: int
+    scene_id: int
+    fire_level: str
     content: str
-    channels: Optional[list] = None
-    push_status: str
+    suggestion: Optional[str] = None
     handled_status: str
     created_at: datetime
-    handled_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
-    minio: Optional[str] = None

@@ -41,6 +41,9 @@ def get_active_scenes(
             "class_names": scene.class_names,
             "class_names_cn": scene.class_names_cn,
             "is_active": scene.is_active,
+            "location_type": scene.location_type,
+            "address": scene.address,
+            "camera_count": scene.camera_count,
             "created_at": scene.created_at,
         }
         for scene in scenes

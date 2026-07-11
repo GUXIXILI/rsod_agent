@@ -120,26 +120,15 @@ class TrainingService:
         }
 
         # 启动后台守护线程执行训练
-        model_type = task_data.model_type if hasattr(task_data, 'model_type') else "yolo"
-        if model_type == "yolo":
-            thread = threading.Thread(
-                target=self._run_training,
-                args=(SessionLocal, task_uuid, config),
-                daemon=True,
-            )
-            with self._lock:
-                self._running_tasks[task_uuid] = thread
-                self._stop_flags[task_uuid] = False
-            thread.start()
-        else:
-            # 非 YOLO 模型类型（xgboost/lstm）路由到预测模型训练器
-            from app.training.predict_model_trainer import predict_model_trainer
-            predict_model_trainer.train(SessionLocal, task_uuid, {
-                **config,
-                "model_type": model_type,
-            })
-            # predict_model_trainer 内部会启动自己的线程，这里直接返回
-            return training_task
+        thread = threading.Thread(
+            target=self._run_training,
+            args=(SessionLocal, task_uuid, config),
+            daemon=True,
+        )
+        with self._lock:
+            self._running_tasks[task_uuid] = thread
+            self._stop_flags[task_uuid] = False
+        thread.start()
 
         return training_task
 
@@ -329,7 +318,7 @@ class TrainingService:
             # 加载预训练模型
             from ultralytics import YOLO
 
-            model_name = config.get("model_name", "yolo11n.pt")
+            model_name = config.get("model_name", "yolov11n.pt")
             model = YOLO(model_name)
             logger.info("预训练模型已加载: %s", model_name)
 
