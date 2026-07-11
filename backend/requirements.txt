@@ -26,7 +26,4 @@ python-dotenv==1.0.0
 pytest
 pytest-asyncio
 PyYAML==6.0.2
-pyowm==3.3.0
 apscheduler==3.11.0
-xgboost==2.1.0
-scikit-learn==1.5.0

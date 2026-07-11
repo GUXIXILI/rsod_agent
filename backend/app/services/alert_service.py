@@ -1,8 +1,8 @@
 """
-预警服务模块
+火灾预警服务模块
 
-根据预测结果生成并分发预警：
-- 高风险（high/critical）时自动创建预警记录
+根据检测结果生成并分发火灾预警：
+- 火情等级为 warning/danger 时自动创建预警记录
 - 推送渠道占位（站内信/邮件/WebSocket），后续可扩展
 """
 from datetime import datetime
@@ -11,129 +11,127 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
-from app.entity.db_models import HazardAlert, RoadHazardPrediction
 
 logger = get_logger(__name__)
 
 
 class AlertService:
-    """预警服务，负责预警的生成与分发"""
+    """火灾预警服务，负责预警的生成与分发"""
 
     def create_alert(
-        self, db: Session, prediction: RoadHazardPrediction
-    ) -> Optional[HazardAlert]:
+        self, db: Session, task, fire_level_result: dict
+    ):
         """
-        根据预测结果创建预警
+        根据检测结果创建火灾预警
 
-        仅当预测风险等级为 high 或 critical 时生成预警。
-        低风险和中风险不触发预警，仅记录预测结果。
+        仅当火情等级为 warning/danger 时生成预警。
+        safe/notice 级别不触发预警。
         """
-        if prediction.risk_level not in ("high", "critical"):
+        from app.entity.db_models import FireAlert
+
+        fire_level = fire_level_result.get("fire_level", "safe")
+        if fire_level not in ("warning", "danger"):
             logger.debug(
-                "风险等级为 %s，未达到预警阈值，跳过预警生成",
-                prediction.risk_level,
+                "火情等级为 %s，未达到预警阈值，跳过预警生成",
+                fire_level,
             )
             return None
 
         # 生成预警内容
-        content = self._build_alert_content(prediction)
+        content = self._build_alert_content(task, fire_level_result)
+        suggestion = self._build_suggestion(fire_level)
 
         # 创建预警记录
-        alert = HazardAlert(
-            location_id=prediction.location_id,
-            alert_level=prediction.risk_level,
+        alert = FireAlert(
+            task_id=task.id,
+            scene_id=task.scene_id,
+            fire_level=fire_level,
             content=content,
-            channels=["internal"],  # 推送渠道：internal（站内信），后续可扩展 email/sms/websocket
+            suggestion=suggestion,
+            channels=["internal"],
             push_status="pending",
-            handled_status="pending",
+            handled_status="unhandled",
         )
         db.add(alert)
         db.commit()
         db.refresh(alert)
 
         logger.info(
-            "预警已生成: alert_id=%s, level=%s, location_id=%s",
+            "火灾预警已生成: alert_id=%s, level=%s, scene_id=%s",
             alert.id,
-            alert.alert_level,
-            alert.location_id,
+            alert.fire_level,
+            alert.scene_id,
         )
 
-        # 推送预警（占位，后续根据 channels 配置分发到不同渠道）
+        # 推送预警（占位）
         self._dispatch_alert(alert)
 
         return alert
 
-    def _build_alert_content(self, prediction: RoadHazardPrediction) -> str:
-        """
-        构建预警内容文本
-
-        根据风险等级和特征摘要生成人类可读的预警信息。
-        """
+    def _build_alert_content(self, task, fire_level_result: dict) -> str:
+        """构建火灾预警内容文本"""
         level_map = {
-            "high": "高风险",
-            "critical": "极高风险",
+            "warning": "警告",
+            "danger": "危险",
         }
-        risk_text = level_map.get(prediction.risk_level, "异常")
-
-        feature = prediction.feature_summary or {}
-        weather_cond = feature.get("weather_condition", "未知")
-        visibility = feature.get("visibility", "未知")
-        density = feature.get("density", 0)
+        level_text = level_map.get(fire_level_result.get("fire_level"), "异常")
 
         return (
-            f"[{risk_text}] 监测点 {prediction.location_id} "
-            f"预测未来路况风险等级为 {risk_text}，"
-            f"风险概率 {prediction.risk_probability:.1%}。"
-            f"天气：{weather_cond}，能见度：{visibility}m，"
-            f"交通密度：{density:.2f}。"
-            f"建议加强监控，必要时采取限速或分流措施。"
+            f"[{level_text}] 监控点 {task.scene_id} 检测到火情，"
+            f"火焰目标 {fire_level_result.get('fire_object_count', 0)} 个，"
+            f"烟雾目标 {fire_level_result.get('smoke_object_count', 0)} 个，"
+            f"火焰面积占比 {fire_level_result.get('fire_area', 0):.1%}。"
         )
 
-    def _dispatch_alert(self, alert: HazardAlert):
+    def _build_suggestion(self, fire_level: str) -> str:
+        """根据火情等级生成处置建议"""
+        suggestions = {
+            "warning": "立即现场核实，准备灭火设备，必要时疏散周边人员",
+            "danger": "立即拨打119，启动消防喷淋，组织人员疏散，切断电源和燃气",
+        }
+        return suggestions.get(fire_level, "")
+
+    def _dispatch_alert(self, alert):
         """
         分发预警到各渠道（占位，后续扩展）
 
         当前仅记录日志，后续可接入：
-        - 站内信系统（数据库写入 + WebSocket 推送）
+        - 站内信系统（WebSocket 推送）
         - 邮件通知（SMTP）
         - 短信通知（SMS API）
         """
         logger.info(
-            "预警分发: alert_id=%s, channels=%s",
+            "火灾预警分发: alert_id=%s, channels=%s",
             alert.id,
             alert.channels,
         )
 
     def get_alerts(
-        self, db: Session, location_id: Optional[int] = None, limit: int = 50
+        self, db: Session, scene_id: Optional[int] = None, limit: int = 50
     ):
-        """
-        获取预警列表
+        """获取火灾预警列表，可按监控点筛选"""
+        from app.entity.db_models import FireAlert
 
-        可按监测点筛选，按创建时间倒序。
-        """
-        query = db.query(HazardAlert).order_by(HazardAlert.created_at.desc())
-        if location_id is not None:
-            query = query.filter(HazardAlert.location_id == location_id)
+        query = db.query(FireAlert).order_by(FireAlert.created_at.desc())
+        if scene_id is not None:
+            query = query.filter(FireAlert.scene_id == scene_id)
         return query.limit(limit).all()
 
-    def handle_alert(self, db: Session, alert_id: int) -> HazardAlert:
-        """
-        标记预警为已处理
+    def handle_alert(self, db: Session, alert_id: int):
+        """标记预警为已处理"""
+        from app.entity.db_models import FireAlert
 
-        更新 handled_status 和 handled_at 时间戳。
-        """
-        alert = db.query(HazardAlert).filter(HazardAlert.id == alert_id).first()
+        alert = db.query(FireAlert).filter(FireAlert.id == alert_id).first()
         if alert is None:
             raise ValueError(f"预警不存在: alert_id={alert_id}")
 
-        alert.handled_status = "handled"
+        alert.handled_status = "resolved"
         alert.handled_at = datetime.now()
-        alert.push_status = "delivered"
+        alert.push_status = "sent"
         db.commit()
         db.refresh(alert)
 
-        logger.info("预警已处理: alert_id=%s", alert_id)
+        logger.info("火灾预警已处理: alert_id=%s", alert_id)
         return alert
 
 
