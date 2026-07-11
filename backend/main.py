@@ -100,6 +100,8 @@ app.add_middleware(RequestLogMiddleware)
 app.include_router(auth_router)
 app.include_router(health_router)
 app.include_router(scenes_router)
+from app.api.training import router as training_router
+app.include_router(training_router)
 from app.api.detection import router as detection_router
 app.include_router(detection_router)
 from app.api.history import router as history_router
