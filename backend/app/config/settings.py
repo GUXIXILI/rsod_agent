@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     """应用全局配置"""
 
     # ── 应用基础配置 ──────────────────────────────────
-    APP_NAME: str = "GLW RSOD Agent Platform"
+    APP_NAME: str = "Fire & Smoke Detection Platform"
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
@@ -43,8 +43,16 @@ class Settings(BaseSettings):
     MINIO_ENDPOINT: str = "localhost:9000"
     MINIO_ACCESS_KEY: str = "minioadmin"
     MINIO_SECRET_KEY: str = "minioadmin"
-    MINIO_BUCKET: str = "rsod-agent-images"
+    MINIO_BUCKET: str = "fire-detection-images"
     MINIO_SECURE: bool = False
+
+    # ── LLM 配置 ──────────────────────────────────────
+    QWEN_API_KEY: str = ""
+    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    QWEN_MODEL: str = "qwen-plus"
+    USE_LOCAL_LLM: bool = False
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen2.5:7b"
 
     # ── JWT 认证配置 ──────────────────────────────────
     JWT_SECRET_KEY: str = ""
@@ -86,15 +94,3 @@ class Settings(BaseSettings):
 
 # 创建全局单例，其他模块直接 import 使用
 settings = Settings()
-
-# ── 安全配置校验 ──────────────────────────────────
-# JWT_SECRET_KEY 是签发和验证 Token 的核心密钥，长度不足或为空会严重降低系统安全性。
-# 这里在启动时进行检测并发出警告，提醒运维人员务必通过 .env 文件配置强密钥。
-if not settings.JWT_SECRET_KEY or len(settings.JWT_SECRET_KEY) < 32:
-    import warnings
-
-    warnings.warn(
-        "JWT_SECRET_KEY 未配置或长度不足 32 位，请立即在 .env 文件中设置强密钥，"
-        "否则系统存在严重安全风险。",
-        stacklevel=2,
-    )
