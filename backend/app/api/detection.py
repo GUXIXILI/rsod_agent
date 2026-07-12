@@ -9,6 +9,7 @@
 - GET /api/detection/alerts — 火灾预警列表
 """
 from typing import List, Optional
+import asyncio
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import get_current_user
 from app.database.session import get_db
 from app.services.detection_service import detection_service
+from app.services.history_service import history_service
 
 router = APIRouter(prefix="/api/detection", tags=["detection"])
 
@@ -33,7 +35,8 @@ async def detect_single(
     """单图检测：上传一张图片，检测火焰和烟雾"""
     try:
         image_bytes = await file.read()
-        task = detection_service.detect_single(
+        task = await asyncio.to_thread(
+            detection_service.detect_single,
             db=db,
             user_id=current_user.id,
             scene_id=scene_id,
@@ -77,7 +80,8 @@ async def detect_batch(
     try:
         image_files = [await f.read() for f in files]
         filenames = [f.filename or f"image_{i}.jpg" for i, f in enumerate(files)]
-        tasks = detection_service.detect_batch(
+        tasks = await asyncio.to_thread(
+            detection_service.detect_batch,
             db=db,
             user_id=current_user.id,
             scene_id=scene_id,
@@ -121,7 +125,8 @@ async def detect_video(
     """视频检测：上传视频文件，逐帧检测"""
     try:
         video_bytes = await file.read()
-        task = detection_service.detect_video(
+        task = await asyncio.to_thread(
+            detection_service.detect_video,
             db=db,
             user_id=current_user.id,
             scene_id=scene_id,
@@ -153,9 +158,12 @@ def get_detection_task(
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取检测任务详情"""
-    from app.services.history_service import history_service
-    detail = history_service.get_task_detail(db, task_id)
+    """获取检测任务详情
+
+    注意：此端点为向后兼容保留，内部直接委托给 history_service.get_task_detail()。
+    建议前端统一使用 GET /api/history/tasks/{task_id} 端点。
+    """
+    detail = history_service.get_task_detail(db, task_id, current_user.id)
     if not detail:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="检测任务不存在")
     return {"code": 200, "message": "success", "data": detail}

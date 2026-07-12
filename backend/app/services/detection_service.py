@@ -9,6 +9,8 @@
 import io
 import os
 import threading
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -30,8 +32,10 @@ logger = get_logger(__name__)
 class DetectionService:
     """火灾烟雾检测服务，封装 YOLOv11 模型推理全流程"""
 
+    MAX_CACHE_SIZE = 4
+
     def __init__(self):
-        self._model_cache: Dict[int, Any] = {}
+        self._model_cache: OrderedDict[int, Any] = OrderedDict()
         self._lock = threading.Lock()
 
     def detect_single(
@@ -103,8 +107,12 @@ class DetectionService:
 
                 result = DetectionResult(
                     task_id=task.id,
+                    image_path=original_url or object_name,
+                    annotated_image_url=annotated_url,
                     class_name=cls_name,
+                    class_id=cls_id,
                     confidence=conf,
+                    bbox=xyxy,
                     x_min=x1,
                     y_min=y1,
                     x_max=x2,
@@ -112,6 +120,8 @@ class DetectionService:
                     width=w,
                     height=h,
                     area=area,
+                    image_width=image.width,
+                    image_height=image.height,
                 )
                 db.add(result)
 
@@ -153,21 +163,38 @@ class DetectionService:
             return task
         except Exception as e:
             logger.exception("单图检测失败: filename=%s, error=%s", filename, e)
-            error_task = DetectionTask(
-                user_id=user_id,
-                scene_id=scene_id,
-                task_type="single",
-                file_name=filename,
-                original_url=original_url,
-                annotated_url=None,
-                status="failed",
-                error_message=str(e),
-                detected_at=datetime.now(),
-            )
-            db.add(error_task)
-            db.commit()
-            db.refresh(error_task)
-            return error_task
+            # 回滚之前 flush 的半成品数据
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            # 尝试清理已上传的 MinIO 原图
+            if original_url:
+                try:
+                    minio_client.delete_file(object_name)
+                except Exception:
+                    logger.warning("清理 MinIO 孤儿文件失败: %s", object_name)
+            # 在新事务中创建 failed 状态记录
+            try:
+                error_task = DetectionTask(
+                    user_id=user_id,
+                    scene_id=scene_id,
+                    task_type="single",
+                    file_name=filename,
+                    original_url=None,
+                    annotated_url=None,
+                    status="failed",
+                    error_message=str(e),
+                    detected_at=datetime.now(),
+                )
+                db.add(error_task)
+                db.commit()
+                db.refresh(error_task)
+                return error_task
+            except Exception:
+                logger.exception("创建失败任务记录也失败: filename=%s", filename)
+                db.rollback()
+                raise
 
     def detect_batch(
         self,
@@ -178,14 +205,32 @@ class DetectionService:
         filenames: List[str],
         **kwargs,
     ) -> List[DetectionTask]:
-        """批量检测：循环调用 detect_single"""
-        tasks = []
-        for img_bytes, fname in zip(image_files, filenames):
+        """批量检测：使用线程池并发处理多张图片"""
+        tasks: List[DetectionTask] = []
+
+        def _detect_one(img_bytes: bytes, fname: str) -> Optional[DetectionTask]:
+            """在独立线程中执行单图检测，使用独立 db session"""
+            thread_db = SessionLocal()
             try:
-                task = self.detect_single(db, user_id, scene_id, img_bytes, fname, **kwargs)
-                tasks.append(task)
-            except Exception as e:
-                logger.error("批量检测中单个图片检测失败: filename=%s, error=%s", fname, e)
+                return self.detect_single(
+                    thread_db, user_id, scene_id, img_bytes, fname, **kwargs
+                )
+            except Exception as exc:
+                logger.error("批量检测中单个图片检测失败: filename=%s, error=%s", fname, exc)
+                thread_db.rollback()
+                return None
+            finally:
+                thread_db.close()
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(_detect_one, img_bytes, fname)
+                for img_bytes, fname in zip(image_files, filenames)
+            ]
+            for f in futures:
+                result = f.result()
+                if result is not None:
+                    tasks.append(result)
         return tasks
 
     def detect_video(
@@ -200,132 +245,144 @@ class DetectionService:
         image_size: int = 640,
         frame_skip: int = 5,
     ) -> DetectionTask:
-        """视频检测：逐帧检测，支持跳帧"""
-        # 上传视频到 MinIO
-        minio_client = MinIOClient()
-        ext = filename.rsplit(".", 1)[-1] if "." in filename else "mp4"
-        object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/{filename}"
-        video_url = minio_client.upload_bytes(video_bytes, object_name, f"video/{ext}")
+        """视频检测：逐帧检测，支持跳帧
 
-        # 加载模型
-        model = self._load_model(db, scene_id)
-
-        # 读取视频
-        temp_path = Path(settings.TRAIN_OUTPUT_DIR) / "temp" / f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-        temp_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path.write_bytes(video_bytes)
-
-        output_path = temp_path.parent / f"output_{filename}"
-        output_url = None
-
-        fps = 0.0
-        total_frames = 0
-        width = 0
-        height = 0
-        fire_frames: List[int] = []
-        smoke_frames: List[int] = []
-        total_fire_count = 0
-        total_smoke_count = 0
-
+        注意：此方法可能在 asyncio.to_thread 中运行，
+        因此创建独立的 db session 以避免跨线程共享。
+        """
+        # 创建独立 session（线程安全）
+        own_db = SessionLocal()
         try:
-            cap = cv2.VideoCapture(str(temp_path))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            minio_client = MinIOClient()
+            ext = filename.rsplit(".", 1)[-1] if "." in filename else "mp4"
+            object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/{filename}"
+            # 上传视频到 MinIO
+            video_url = minio_client.upload_bytes(video_bytes, object_name, f"video/{ext}")
 
-            # 创建输出视频
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            out = cv2.VideoWriter(str(output_path), fourcc, fps / max(frame_skip, 1), (width, height))
+            # 加载模型
+            model = self._load_model(own_db, scene_id)
 
-            frame_idx = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                frame_idx += 1
+            # 读取视频
+            temp_path = Path(settings.TRAIN_OUTPUT_DIR) / "temp" / f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_bytes(video_bytes)
 
-                if frame_idx % frame_skip != 0:
-                    out.write(frame)
-                    continue
+            output_path = temp_path.parent / f"output_{filename}"
+            output_url = None
 
-                results = model(frame, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
-                annotated_frame = results[0].plot()
-                out.write(annotated_frame)
+            fps = 0.0
+            total_frames = 0
+            width = 0
+            height = 0
+            fire_frames: List[int] = []
+            smoke_frames: List[int] = []
+            total_fire_count = 0
+            total_smoke_count = 0
 
-                for box in results[0].boxes:
-                    cls_name = model.names[int(box.cls[0])]
-                    if cls_name == "fire":
-                        fire_frames.append(frame_idx)
-                        total_fire_count += 1
-                    elif cls_name == "smoke":
-                        smoke_frames.append(frame_idx)
-                        total_smoke_count += 1
+            try:
+                cap = cv2.VideoCapture(str(temp_path))
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            cap.release()
-            out.release()
+                # 创建输出视频
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out = cv2.VideoWriter(str(output_path), fourcc, fps / max(frame_skip, 1), (width, height))
 
-            # 上传输出视频
-            output_bytes = output_path.read_bytes()
-            output_object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/output_{filename}"
-            output_url = minio_client.upload_bytes(output_bytes, output_object_name, f"video/{ext}")
-        finally:
-            if 'cap' in locals():
+                frame_idx = 0
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frame_idx += 1
+
+                    if frame_idx % frame_skip != 0:
+                        out.write(frame)
+                        continue
+
+                    results = model(frame, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
+                    annotated_frame = results[0].plot()
+                    out.write(annotated_frame)
+
+                    for box in results[0].boxes:
+                        cls_name = model.names[int(box.cls[0])]
+                        if cls_name == "fire":
+                            fire_frames.append(frame_idx)
+                            total_fire_count += 1
+                        elif cls_name == "smoke":
+                            smoke_frames.append(frame_idx)
+                            total_smoke_count += 1
+
                 cap.release()
-            if 'out' in locals():
                 out.release()
-            if temp_path.exists():
-                os.remove(str(temp_path))
-            if output_path.exists():
-                os.remove(str(output_path))
 
-        # 火情等级判定
-        from app.services.fire_level_service import fire_level_service
-        fire_level_result = fire_level_service.judge(
-            fire_count=total_fire_count,
-            smoke_count=total_smoke_count,
-            fire_area=len(fire_frames) / max(total_frames, 1),
-            smoke_area=len(smoke_frames) / max(total_frames, 1),
-        )
+                # 上传输出视频
+                output_bytes = output_path.read_bytes()
+                output_object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/output_{filename}"
+                output_url = minio_client.upload_bytes(output_bytes, output_object_name, f"video/{ext}")
+            finally:
+                if 'cap' in locals():
+                    cap.release()
+                if 'out' in locals():
+                    out.release()
+                if temp_path.exists():
+                    os.remove(str(temp_path))
+                if output_path.exists():
+                    os.remove(str(output_path))
 
-        # 创建 DetectionTask
-        task = DetectionTask(
-            user_id=user_id,
-            scene_id=scene_id,
-            task_type="video",
-            file_name=filename,
-            original_url=video_url,
-            annotated_url=output_url,
-            status="completed",
-            image_width=width,
-            image_height=height,
-            video_duration=total_frames / fps if fps > 0 else 0,
-            fire_level=fire_level_result["fire_level"],
-            risk_level=fire_level_result["fire_level"],
-            fire_area=fire_level_result["fire_area"],
-            smoke_area=fire_level_result["smoke_area"],
-            fire_object_count=total_fire_count,
-            smoke_object_count=total_smoke_count,
-            detected_at=datetime.now(),
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
+            # 火情等级判定
+            from app.services.fire_level_service import fire_level_service
+            fire_level_result = fire_level_service.judge(
+                fire_count=total_fire_count,
+                smoke_count=total_smoke_count,
+                fire_area=len(fire_frames) / max(total_frames, 1),
+                smoke_area=len(smoke_frames) / max(total_frames, 1),
+            )
 
-        # 生成火灾预警
-        from app.services.alert_service import alert_service
-        alert_service.create_alert(db, task, fire_level_result)
+            # 创建 DetectionTask
+            task = DetectionTask(
+                user_id=user_id,
+                scene_id=scene_id,
+                task_type="video",
+                file_name=filename,
+                original_url=video_url,
+                annotated_url=output_url,
+                status="completed",
+                image_width=width,
+                image_height=height,
+                video_duration=total_frames / fps if fps > 0 else 0,
+                fire_level=fire_level_result["fire_level"],
+                risk_level=fire_level_result["fire_level"],
+                fire_area=fire_level_result["fire_area"],
+                smoke_area=fire_level_result["smoke_area"],
+                fire_object_count=total_fire_count,
+                smoke_object_count=total_smoke_count,
+                detected_at=datetime.now(),
+            )
+            own_db.add(task)
+            own_db.commit()
+            own_db.refresh(task)
 
-        logger.info(
-            "视频检测完成: task_id=%s, total_frames=%d, fire_frames=%d, smoke_frames=%d",
-            task.id, total_frames, len(fire_frames), len(smoke_frames),
-        )
-        return task
+            # 生成火灾预警
+            from app.services.alert_service import alert_service
+            alert_service.create_alert(own_db, task, fire_level_result)
+
+            logger.info(
+                "视频检测完成: task_id=%s, total_frames=%d, fire_frames=%d, smoke_frames=%d",
+                task.id, total_frames, len(fire_frames), len(smoke_frames),
+            )
+            return task
+        finally:
+            own_db.close()
 
     def _load_model(self, db: Session, scene_id: int):
-        """加载场景默认模型（带缓存）"""
-        if scene_id in self._model_cache:
-            return self._model_cache[scene_id]
+        """加载场景默认模型（带 LRU 缓存，最大 MAX_CACHE_SIZE 个）"""
+        with self._lock:
+            if scene_id in self._model_cache:
+                # 移到末尾表示最近使用
+                self._model_cache.move_to_end(scene_id)
+                return self._model_cache[scene_id]
 
         from ultralytics import YOLO
 
@@ -339,6 +396,7 @@ class DetectionService:
         with self._lock:
             # 加锁后再次检查，避免并发重复加载
             if scene_id in self._model_cache:
+                self._model_cache.move_to_end(scene_id)
                 return self._model_cache[scene_id]
 
             if model_version and model_version.model_path:
@@ -346,6 +404,12 @@ class DetectionService:
             else:
                 # 使用 yolov11n 作为默认模型
                 model = YOLO("yolov11n.pt")
+
+            # LRU 淘汰：超出上限时移除最久未使用的模型
+            if len(self._model_cache) >= self.MAX_CACHE_SIZE:
+                oldest_key = next(iter(self._model_cache))
+                del self._model_cache[oldest_key]
+                logger.info("模型缓存已满，淘汰最旧模型: scene_id=%s", oldest_key)
 
             self._model_cache[scene_id] = model
 

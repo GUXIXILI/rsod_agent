@@ -4,7 +4,7 @@ Refresh Token 管理模块
 独立模块 — 不修改 security.py，删除此文件即可移除 refresh_token 功能
 """
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from app.config.settings import settings
 from app.entity.db_models import User, RefreshToken
@@ -21,7 +21,7 @@ def create_refresh_token(db: Session, user: User) -> str:
         refresh_token 字符串
     """
     token_str = secrets.token_urlsafe(64)
-    expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
     refresh_token = RefreshToken(
         user_id=user.id,
@@ -57,7 +57,7 @@ def validate_refresh_token(db: Session, token_str: str) -> User:
     if token_record.is_revoked:
         raise ValueError("refresh_token 已撤销")
 
-    if token_record.expires_at < datetime.utcnow():
+    if token_record.expires_at < datetime.now(timezone.utc):
         db.delete(token_record)
         db.commit()
         raise ValueError("refresh_token 已过期")

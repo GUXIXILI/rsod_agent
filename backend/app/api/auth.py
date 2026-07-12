@@ -7,7 +7,7 @@
 - POST /api/auth/logout-all  退出所有设备
 - GET  /api/auth/me        获取当前用户信息
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
@@ -107,7 +107,7 @@ async def login(request: UserLogin, db: Session = Depends(get_db)):
     clear_login_attempts(request.username)
 
     # 更新最后登录时间
-    user.last_login_at = datetime.utcnow()
+    user.last_login_at = datetime.now(timezone.utc)
     db.commit()
 
     # 生成 Token

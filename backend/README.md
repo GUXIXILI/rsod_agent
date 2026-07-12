@@ -1,6 +1,6 @@
-# GLW RSOD Agent Platform 后端工程说明
+# Fire & Smoke Detection Platform 后端工程说明
 
-　　本目录为基于 YOLOv11 的目标检测智能体平台后端工程，当前处于 Day02 项目初始化阶段。工程采用 FastAPI + SQLAlchemy + Alembic + PostgreSQL + Redis + MinIO 技术栈，已完成后端目录结构、全局配置、数据库连接、ORM 模型、Pydantic Schema、数据库迁移、MinIO 客户端、Docker Compose 基础设施、JWT 认证模块以及 main.py 入口。
+　　本目录为火灾与烟雾智能检测平台后端工程，当前处于 Day02 项目初始化阶段。工程采用 FastAPI + SQLAlchemy + Alembic + PostgreSQL + Redis + MinIO 技术栈，已完成后端目录结构、全局配置、数据库连接、ORM 模型、Pydantic Schema、数据库迁移、MinIO 客户端、Docker Compose 基础设施、JWT 认证模块以及 main.py 入口。
 
 ## 工程结构
 
@@ -119,6 +119,6 @@ curl.exe -X GET http://localhost:8080/api/auth/me `
 ## 注意事项
 
 - `.env` 文件已被 `.gitignore` 忽略，新成员可从 `.env.example` 复制并修改。
-- `.env.example` 中 `MINIO_BUCKET` 当前为 `rsod-images`，与工程实际使用的 `rsod-agent-images` 不一致，复制后请按实际情况调整。
+- `.env.example` 中 `MINIO_BUCKET` 当前为 `fire-detection-images`，与 `.env` 一致，复制后可直接使用。
 - `app/__init__.py` 当前缺失，Python 3 中仍可作为命名空间包导入，但建议补全以保持规范。
 - 启动时可能出现 Pydantic 保护命名空间警告（`model_` 前缀字段），不影响运行，可通过设置 `model_config = {"protected_namespaces": ()}` 消除。
