@@ -23,7 +23,7 @@ class TestHealthCheck:
         data = response.json()
         assert data["code"] == 200
         assert data["data"]["status"] == "healthy"
-        assert data["data"]["app_name"] == "GLW RSOD Agent Platform"
+        assert data["data"]["app_name"] == "Fire & Smoke Detection Platform"
 
     def test_health_detail(self, client: TestClient):
         """测试详细健康检查返回各依赖状态"""
