@@ -1,11 +1,12 @@
 """
-数据库模型定义
+数据库模型定义（共 16 张表）
 表结构总览：
   用户权限：users, roles, permissions, user_roles, role_permissions
   检测业务：detection_scenes, detection_tasks, detection_results
   模型管理：training_tasks, training_metrics, model_versions
   智能体：  chat_sessions, chat_messages
   系统运维：operation_logs
+  认证令牌：refresh_tokens
   火灾预警：fire_alerts
 """
 from datetime import datetime
@@ -407,6 +408,7 @@ class OperationLog(Base):
     user_agent = Column(String(500), nullable=True, comment="客户端 User-Agent")
     request_method = Column(String(10), nullable=True, comment="HTTP 方法")
     request_path = Column(String(500), nullable=True, comment="请求路径")
+    request_body = Column(Text, nullable=True, comment="请求体摘要(脱敏)")
 
     # 结果
     status = Column(String(20), default="success", comment="操作结果：success/failure")
@@ -452,7 +454,8 @@ class FireAlert(Base):
     content = Column(Text, nullable=False, comment="预警内容")
     suggestion = Column(Text, nullable=True, comment="处置建议")
     channels = Column(JSON, nullable=True, comment="推送渠道")
-    push_status = Column(String(20), default="pending", comment="推送状态：pending/sent/failed")
+    push_status = Column(String(20), default="pending", comment="推送状态：pending/dispatched/sent/failed")
+    pushed_at = Column(DateTime, nullable=True, comment="推送时间")
     handled_status = Column(String(20), default="unhandled", comment="处理状态：unhandled/handling/resolved")
     created_at = Column(DateTime, default=datetime.now, comment="创建时间")
     handled_at = Column(DateTime, nullable=True, comment="处理时间")

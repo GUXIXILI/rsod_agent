@@ -5,7 +5,7 @@
 - 火情等级为 notice/warning/danger 时自动创建预警记录
 - 推送渠道占位（站内信/邮件/WebSocket），后续可扩展
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
@@ -65,6 +65,8 @@ class AlertService:
 
         # 推送预警（占位）
         self._dispatch_alert(alert)
+        db.commit()
+        db.refresh(alert)
 
         return alert
 
@@ -90,19 +92,14 @@ class AlertService:
         return suggestions.get(fire_level, "")
 
     def _dispatch_alert(self, alert):
-        """
-        分发预警到各渠道（占位，后续扩展）
-
-        当前仅记录日志，后续可接入：
-        - 站内信系统（WebSocket 推送）
-        - 邮件通知（SMTP）
-        - 短信通知（SMS API）
-        """
+        """分发预警并更新推送状态"""
         logger.info(
             "火灾预警分发: alert_id=%s, channels=%s",
             alert.id,
             alert.channels,
         )
+        alert.push_status = "dispatched"
+        alert.pushed_at = datetime.now(timezone.utc)
 
     def get_alerts(
         self,
