@@ -108,6 +108,8 @@ from app.api.traffic import router as traffic_router
 app.include_router(traffic_router)
 from app.api.hazard import router as hazard_router
 app.include_router(hazard_router)
+from app.api.detection import router as detection_router
+app.include_router(detection_router)
 
 
 @app.get("/")
