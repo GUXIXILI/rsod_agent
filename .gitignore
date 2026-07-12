@@ -81,3 +81,5 @@ tmp_*.json
 runs/
 datasets/
 !datasets/rsod/yolo_dataset/data.yaml
+
+_temp_diff.txt
