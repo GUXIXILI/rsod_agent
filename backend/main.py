@@ -5,9 +5,12 @@ from app.config.settings import settings
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.scenes import router as scenes_router
+from app.api.roles import router as roles_router
+from app.api.chat import router as chat_router
 from app.core.logger import setup_logging, get_logger
 from app.core.exceptions import register_exception_handlers
 from app.middleware.request_logger import RequestLogMiddleware
+from app.middleware.audit_log import AuditLogMiddleware
 
 # ── 初始化日志系统 ────────────────────────────────────
 # 必须在创建 app 之前调用，确保后续所有模块的 logger 都已配置好
@@ -15,12 +18,6 @@ setup_logging()
 
 logger = get_logger(__name__)
 
-# 启动前安全检查：JWT 密钥必须配置
-if not settings.JWT_SECRET_KEY or len(settings.JWT_SECRET_KEY) < 32:
-    logger.error(
-        "JWT_SECRET_KEY 未配置或长度不足 32 位，系统运行在极低安全模式下，"
-        "请通过环境变量或 .env 文件配置强密钥。"
-    )
 
 
 def init_minio():
@@ -52,6 +49,9 @@ def init_minio():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
+    # 启动时安全检查：非 DEBUG 模式下 JWT 密钥必须配置
+    if not settings.DEBUG and (not settings.JWT_SECRET_KEY or len(settings.JWT_SECRET_KEY) < 32):
+        raise RuntimeError("生产环境 JWT_SECRET_KEY 未配置或长度不足32位，拒绝启动")
     # 启动时执行
     print("正在初始化服务...")
     init_minio()
@@ -70,9 +70,9 @@ async def lifespan(_app: FastAPI):
 
 # 创建 FastAPI 实例
 app = FastAPI(
-    title="GLW RSOD Agent Platform",
-    version="0.1.0",
-    description="基于 YOLOv11 的目标检测智能体平台 API",
+    title="GLW Fire & Smoke Detection Platform",
+    version="2.0.0",
+    description="基于 YOLOv11 的火灾烟雾智能检测预警平台 API",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -96,27 +96,31 @@ app.add_middleware(
 # 记录每次 API 请求的进入/离开日志（跳过 /docs、/api/health 等路径）
 app.add_middleware(RequestLogMiddleware)
 
+# ── 操作审计日志中间件 ───────────────────────────────
+# 拦截写操作（POST/PUT/DELETE），异步记录到 operation_logs 表
+app.add_middleware(AuditLogMiddleware)
+
 # ── 注册路由 ─────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(health_router)
 app.include_router(scenes_router)
 from app.api.training import router as training_router
 app.include_router(training_router)
-from app.api.weather import router as weather_router
-app.include_router(weather_router)
-from app.api.traffic import router as traffic_router
-app.include_router(traffic_router)
-from app.api.hazard import router as hazard_router
-app.include_router(hazard_router)
 from app.api.detection import router as detection_router
 app.include_router(detection_router)
+from app.api.history import router as history_router
+app.include_router(history_router)
+from app.api.stats import router as stats_router
+app.include_router(stats_router)
+app.include_router(roles_router)
+app.include_router(chat_router)
 
 
 @app.get("/")
 def root():
     return {
-        "message": "欢迎使用 GLW RSOD Agent Platform",
-        "version": "0.1.0",
+        "message": "欢迎使用 GLW 火灾烟雾智能检测系统",
+        "version": "2.0.0",
         "docs": "/docs",
         "redoc": "/redoc",
     }

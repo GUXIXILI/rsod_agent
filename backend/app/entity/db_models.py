@@ -1,12 +1,13 @@
 """
-数据库模型定义
+数据库模型定义（共 16 张表）
 表结构总览：
   用户权限：users, roles, permissions, user_roles, role_permissions
   检测业务：detection_scenes, detection_tasks, detection_results
   模型管理：training_tasks, training_metrics, model_versions
   智能体：  chat_sessions, chat_messages
   系统运维：operation_logs
-  交通监测：weather_data, traffic_data, road_hazard_predictions, hazard_alerts
+  认证令牌：refresh_tokens
+  火灾预警：fire_alerts
 """
 from datetime import datetime
 from sqlalchemy import (
@@ -106,37 +107,32 @@ class RolePermission(Base):
 
 class DetectionScene(Base):
     """检测场景配置表
-    每个小组/业务方向一个场景，如：遥感检测、工业缺陷、农业病害等
-    场景决定了使用哪个模型、检测哪些类别
+    火灾烟雾检测场景，决定使用哪个模型、检测哪些类别
     """
     __tablename__ = "detection_scenes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(100), unique=True, nullable=False, comment="场景标识，如 remote_sensing")
-    display_name = Column(String(100), nullable=False, comment="场景显示名，如 遥感目标检测")
+    name = Column(String(100), unique=True, nullable=False, comment="场景标识，如 fire_smoke")
+    display_name = Column(String(100), nullable=False, comment="场景显示名，如 火灾烟雾检测")
     description = Column(Text, nullable=True, comment="场景描述")
-    category = Column(String(50), nullable=False, comment="场景分类：agriculture/industry/remote_sensing/medical/traffic")
-    class_names = Column(JSON, nullable=False, comment="类别列表，如 [\"airplane\",\"storage-tank\"]")
-    class_names_cn = Column(JSON, nullable=True, comment="类别中文名映射，如 {\"airplane\":\"飞机\"}")
+    category = Column(String(50), nullable=False, comment="场景分类：fire")
+    class_names = Column(JSON, nullable=False, comment="类别列表，如 [\"fire\",\"smoke\"]")
+    class_names_cn = Column(JSON, nullable=True, comment="类别中文名映射，如 {\"fire\":\"火焰\",\"smoke\":\"烟雾\"}")
     is_active = Column(Boolean, default=True, comment="是否启用")
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="创建人")
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     
-    # 地理位置信息
-    latitude = Column(Float, nullable=True, comment="纬度")
-    longitude = Column(Float, nullable=True, comment="经度")
-    road_id = Column(String(100), nullable=True, comment="道路编号")
-    monitoring_type = Column(String(50), nullable=True, comment="监测点类型")
+    # 火灾监控点信息
+    location_type = Column(String(50), nullable=True, comment="监控点类型：warehouse/forest/factory/building/site")
+    address = Column(String(500), nullable=True, comment="监控点详细地址")
+    camera_count = Column(Integer, default=1, comment="摄像头数量")
 
     # 关联
     detection_tasks = relationship("DetectionTask", back_populates="scene")
     model_versions = relationship("ModelVersion", back_populates="scene")
     training_tasks = relationship("TrainingTask", back_populates="scene")
-    weather_data = relationship("WeatherData", back_populates="scene", cascade="all, delete-orphan")
-    traffic_data = relationship("TrafficData", back_populates="scene", cascade="all, delete-orphan")
-    hazard_predictions = relationship("RoadHazardPrediction", back_populates="scene", cascade="all, delete-orphan")
-    hazard_alerts = relationship("HazardAlert", back_populates="scene", cascade="all, delete-orphan")
+    fire_alerts = relationship("FireAlert", back_populates="scene", cascade="all, delete-orphan")
 
 
 class DetectionTask(Base):
@@ -166,8 +162,22 @@ class DetectionTask(Base):
     # 分析与建议（AI 生成）
     analysis_report = Column(Text, nullable=True, comment="分析报告（Markdown 格式）")
     analysis_suggestion = Column(Text, nullable=True, comment="专业建议")
-    risk_level = Column(String(20), nullable=True, comment="风险等级：low/medium/high/critical")
+    risk_level = Column(String(20), nullable=True, comment="火情等级：safe/notice/warning/danger")
+    fire_level = Column(String(20), nullable=True, comment="火情等级（冗余字段，同 risk_level）")
+    fire_area = Column(Float, nullable=True, comment="火焰像素面积占比 0~1")
+    smoke_area = Column(Float, nullable=True, comment="烟雾像素面积占比 0~1")
+    fire_object_count = Column(Integer, default=0, comment="火焰目标数量")
+    smoke_object_count = Column(Integer, default=0, comment="烟雾目标数量")
     analyzed_at = Column(DateTime, nullable=True, comment="分析完成时间")
+
+    # 媒体文件信息（服务层写入）
+    file_name = Column(String(255), nullable=True, comment="原始文件名")
+    original_url = Column(String(500), nullable=True, comment="原始文件 URL")
+    annotated_url = Column(String(500), nullable=True, comment="标注结果文件 URL")
+    image_width = Column(Integer, nullable=True, comment="媒体宽度（像素）")
+    image_height = Column(Integer, nullable=True, comment="媒体高度（像素）")
+    video_duration = Column(Float, nullable=True, comment="视频时长（秒），图像时为空")
+    detected_at = Column(DateTime, nullable=True, comment="检测完成时间")
 
     created_at = Column(DateTime, default=datetime.now, index=True, comment="创建时间")
     completed_at = Column(DateTime, nullable=True, comment="完成时间")
@@ -194,6 +204,15 @@ class DetectionResult(Base):
     class_id = Column(Integer, nullable=False, comment="类别 ID")
     confidence = Column(Float, nullable=False, comment="置信度 0~1")
     bbox = Column(JSON, nullable=False, comment="边界框 [x1, y1, x2, y2]")
+
+    # 边界框坐标（服务层冗余写入，方便统计查询）
+    x_min = Column(Float, nullable=True, comment="边界框左上角 x 坐标")
+    y_min = Column(Float, nullable=True, comment="边界框左上角 y 坐标")
+    x_max = Column(Float, nullable=True, comment="边界框右下角 x 坐标")
+    y_max = Column(Float, nullable=True, comment="边界框右下角 y 坐标")
+    width = Column(Integer, nullable=True, comment="边界框宽度（像素）")
+    height = Column(Integer, nullable=True, comment="边界框高度（像素）")
+    area = Column(Float, nullable=True, comment="边界框面积（像素）")
 
     # 图像级信息（冗余存储，方便查询）
     inference_time = Column(Float, nullable=True, comment="该图推理耗时（ms）")
@@ -222,7 +241,6 @@ class TrainingTask(Base):
 
     # 训练配置
     model_name = Column(String(50), default="yolov11n", comment="基础模型：yolov11n/s/m/l/x")
-    model_type = Column(String(20), default="yolo", comment="模型类型：yolo/xgboost/lstm")
     epochs = Column(Integer, default=100, comment="训练轮数")
     img_size = Column(Integer, default=640, comment="图像尺寸")
     batch_size = Column(Integer, default=16, comment="批次大小")
@@ -390,6 +408,7 @@ class OperationLog(Base):
     user_agent = Column(String(500), nullable=True, comment="客户端 User-Agent")
     request_method = Column(String(10), nullable=True, comment="HTTP 方法")
     request_path = Column(String(500), nullable=True, comment="请求路径")
+    request_body = Column(Text, nullable=True, comment="请求体摘要(脱敏)")
 
     # 结果
     status = Column(String(20), default="success", comment="操作结果：success/failure")
@@ -421,76 +440,26 @@ class RefreshToken(Base):
 
 
 # ══════════════════════════════════════════════════════════════
-# 七、交通监测
+# 七、火灾预警
 # ══════════════════════════════════════════════════════════════
 
-class WeatherData(Base):
-    """气象数据表 — 记录各监测点的气象信息"""
-    __tablename__ = "weather_data"
+class FireAlert(Base):
+    """火灾预警表 — 检测到火情时自动生成预警记录"""
+    __tablename__ = "fire_alerts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    location_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监测位置/场景 ID")
-    timestamp = Column(DateTime, nullable=False, comment="数据采集时间")
-    temperature = Column(Float, nullable=True, comment="温度（℃）")
-    humidity = Column(Float, nullable=True, comment="湿度（%）")
-    precipitation = Column(Float, nullable=True, comment="降水量（mm）")
-    wind_speed = Column(Float, nullable=True, comment="风速（m/s）")
-    visibility = Column(Integer, nullable=True, comment="能见度（m）")
-    weather_condition = Column(String(50), nullable=True, comment="天气状况：sunny/cloudy/rainy/snowy/foggy")
-    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
-
-    # 关联
-    scene = relationship("DetectionScene", back_populates="weather_data")
-
-
-class TrafficData(Base):
-    """交通流量数据表 — 记录各监测点的交通流量信息"""
-    __tablename__ = "traffic_data"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    location_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监测位置/场景 ID")
-    timestamp = Column(DateTime, nullable=False, comment="数据采集时间")
-    vehicle_count = Column(Integer, nullable=True, comment="车辆数量")
-    avg_speed = Column(Float, nullable=True, comment="平均车速（km/h）")
-    vehicle_types = Column(JSON, nullable=True, comment="车辆类型分布，如 {\"car\":120,\"truck\":30,\"bus\":10}")
-    density = Column(Float, nullable=True, comment="车流密度（veh/km）")
-    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
-
-    # 关联
-    scene = relationship("DetectionScene", back_populates="traffic_data")
-
-
-class RoadHazardPrediction(Base):
-    """道路风险预测表 — 记录基于模型的道路风险预测结果"""
-    __tablename__ = "road_hazard_predictions"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    location_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监测位置/场景 ID")
-    prediction_time = Column(DateTime, nullable=False, comment="预测时间")
-    horizon_minutes = Column(Integer, nullable=True, comment="预测时间范围（分钟）")
-    risk_level = Column(String(20), nullable=True, comment="风险等级：low/medium/high/critical")
-    risk_probability = Column(Float, nullable=True, comment="风险概率 0~1")
-    model_type = Column(String(20), nullable=True, comment="预测模型类型：xgboost/lstm/yolo")
-    feature_summary = Column(JSON, nullable=True, comment="特征摘要，如 {\"top_features\":[\"rain\",\"speed\"]}")
-    created_at = Column(DateTime, default=datetime.now, comment="创建时间")
-
-    # 关联
-    scene = relationship("DetectionScene", back_populates="hazard_predictions")
-
-
-class HazardAlert(Base):
-    """危险预警表 — 记录道路危险预警信息"""
-    __tablename__ = "hazard_alerts"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    location_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监测位置/场景 ID")
-    alert_level = Column(String(20), nullable=False, comment="预警等级：warning/danger/critical")
+    task_id = Column(Integer, ForeignKey("detection_tasks.id"), nullable=False, index=True, comment="关联检测任务")
+    scene_id = Column(Integer, ForeignKey("detection_scenes.id"), nullable=False, index=True, comment="监控点")
+    fire_level = Column(String(20), nullable=False, comment="火情等级：notice/warning/danger")
     content = Column(Text, nullable=False, comment="预警内容")
-    channels = Column(JSON, nullable=True, comment="推送渠道，如 [\"sms\",\"email\",\"app_push\"]")
-    push_status = Column(String(20), default="pending", comment="推送状态：pending/sent/failed")
+    suggestion = Column(Text, nullable=True, comment="处置建议")
+    channels = Column(JSON, nullable=True, comment="推送渠道")
+    push_status = Column(String(20), default="pending", comment="推送状态：pending/dispatched/sent/failed")
+    pushed_at = Column(DateTime, nullable=True, comment="推送时间")
     handled_status = Column(String(20), default="unhandled", comment="处理状态：unhandled/handling/resolved")
     created_at = Column(DateTime, default=datetime.now, comment="创建时间")
     handled_at = Column(DateTime, nullable=True, comment="处理时间")
 
     # 关联
-    scene = relationship("DetectionScene", back_populates="hazard_alerts")
+    scene = relationship("DetectionScene", back_populates="fire_alerts")
+    task = relationship("DetectionTask")

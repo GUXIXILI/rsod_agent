@@ -9,6 +9,8 @@
 """
 import csv
 import os
+import shutil
+import tempfile
 import threading
 import uuid
 from datetime import datetime
@@ -120,26 +122,15 @@ class TrainingService:
         }
 
         # 启动后台守护线程执行训练
-        model_type = task_data.model_type if hasattr(task_data, 'model_type') else "yolo"
-        if model_type == "yolo":
-            thread = threading.Thread(
-                target=self._run_training,
-                args=(SessionLocal, task_uuid, config),
-                daemon=True,
-            )
-            with self._lock:
-                self._running_tasks[task_uuid] = thread
-                self._stop_flags[task_uuid] = False
-            thread.start()
-        else:
-            # 非 YOLO 模型类型（xgboost/lstm）路由到预测模型训练器
-            from app.training.predict_model_trainer import predict_model_trainer
-            predict_model_trainer.train(SessionLocal, task_uuid, {
-                **config,
-                "model_type": model_type,
-            })
-            # predict_model_trainer 内部会启动自己的线程，这里直接返回
-            return training_task
+        thread = threading.Thread(
+            target=self._run_training,
+            args=(SessionLocal, task_uuid, config),
+            daemon=True,
+        )
+        with self._lock:
+            self._running_tasks[task_uuid] = thread
+            self._stop_flags[task_uuid] = False
+        thread.start()
 
         return training_task
 
@@ -307,9 +298,9 @@ class TrainingService:
         10. 清理 _running_tasks 和 _stop_flags
         """
         db = db_session_factory()
-        # 在 try 外部初始化 original_path，确保 finally 块中可安全引用
+        # 在 try 外部初始化，确保 finally 块中可安全引用
         data_yaml_path = config.get("data_yaml_path")
-        original_path = None
+        temp_yaml_dir = None  # 临时 data.yaml 副本所在目录
         try:
             # 更新任务状态为 running
             task = db.query(TrainingTask).filter(
@@ -329,20 +320,24 @@ class TrainingService:
             # 加载预训练模型
             from ultralytics import YOLO
 
-            model_name = config.get("model_name", "yolo11n.pt")
+            model_name = config.get("model_name", "yolov11n.pt")
             model = YOLO(model_name)
             logger.info("预训练模型已加载: %s", model_name)
 
-            # 临时修改 data.yaml 的 path 为绝对路径
+            # 复制 data.yaml 到独立临时目录，避免并发训练相互干扰
+            train_data_yaml = data_yaml_path  # 默认使用原始路径
             if data_yaml_path and os.path.isfile(data_yaml_path):
-                with open(data_yaml_path, "r", encoding="utf-8") as f:
+                temp_yaml_dir = tempfile.mkdtemp(prefix="yolo_data_")
+                temp_yaml_path = os.path.join(temp_yaml_dir, "data.yaml")
+                shutil.copy2(data_yaml_path, temp_yaml_path)
+
+                # 修改副本的 path 为绝对路径
+                with open(temp_yaml_path, "r", encoding="utf-8") as f:
                     yaml_data = yaml.safe_load(f)
-                original_path = yaml_data.get("path")
-                # 将 path 设为绝对路径，确保 Ultralytics 正确找到数据集
                 yaml_data["path"] = str(
                     Path(data_yaml_path).parent.resolve()
                 )
-                with open(data_yaml_path, "w", encoding="utf-8") as f:
+                with open(temp_yaml_path, "w", encoding="utf-8") as f:
                     yaml.dump(
                         yaml_data,
                         f,
@@ -350,8 +345,9 @@ class TrainingService:
                         allow_unicode=True,
                         sort_keys=False,
                     )
+                train_data_yaml = temp_yaml_path
                 logger.info(
-                    "data.yaml path 已临时修改为绝对路径: %s", yaml_data["path"]
+                    "data.yaml 已复制到临时目录并修改 path: %s", yaml_data["path"]
                 )
 
             # 注册训练回调
@@ -422,7 +418,7 @@ class TrainingService:
             # 构建训练参数
             output_dir = config["output_dir"]
             train_args = {
-                "data": data_yaml_path,
+                "data": train_data_yaml,
                 "epochs": config.get("epochs", 100),
                 "batch": config.get("batch_size", 16),
                 "imgsz": config.get("img_size", 640),
@@ -473,23 +469,13 @@ class TrainingService:
             except Exception:
                 logger.exception("更新训练失败状态异常: task_uuid=%s", task_uuid)
         finally:
-            # 恢复 data.yaml 原始 path（data_yaml_path 已在 try 外定义）
-            if data_yaml_path and original_path is not None and os.path.isfile(data_yaml_path):
+            # 清理临时 data.yaml 副本目录
+            if temp_yaml_dir and os.path.isdir(temp_yaml_dir):
                 try:
-                    with open(data_yaml_path, "r", encoding="utf-8") as f:
-                        yaml_data = yaml.safe_load(f)
-                    yaml_data["path"] = original_path
-                    with open(data_yaml_path, "w", encoding="utf-8") as f:
-                        yaml.dump(
-                            yaml_data,
-                            f,
-                            default_flow_style=False,
-                            allow_unicode=True,
-                            sort_keys=False,
-                        )
-                    logger.info("data.yaml path 已恢复为原始值: %s", original_path)
+                    shutil.rmtree(temp_yaml_dir)
+                    logger.info("临时 data.yaml 目录已清理: %s", temp_yaml_dir)
                 except Exception:
-                    logger.exception("恢复 data.yaml path 失败")
+                    logger.exception("清理临时 data.yaml 目录失败: %s", temp_yaml_dir)
 
             db.close()
 

@@ -31,17 +31,24 @@ def get_active_scenes(
         .all()
     )
 
-    return [
-        {
-            "id": scene.id,
-            "name": scene.name,
-            "display_name": scene.display_name,
-            "description": scene.description,
-            "category": scene.category,
-            "class_names": scene.class_names,
-            "class_names_cn": scene.class_names_cn,
-            "is_active": scene.is_active,
-            "created_at": scene.created_at,
-        }
-        for scene in scenes
-    ]
+    return {
+        "code": 200,
+        "message": "success",
+        "data": [
+            {
+                "id": scene.id,
+                "name": scene.name,
+                "display_name": scene.display_name,
+                "description": scene.description,
+                "category": scene.category,
+                "class_names": scene.class_names,
+                "class_names_cn": scene.class_names_cn,
+                "is_active": scene.is_active,
+                "location_type": scene.location_type,
+                "address": scene.address,
+                "camera_count": scene.camera_count,
+                "created_at": scene.created_at,
+            }
+            for scene in scenes
+        ],
+    }
