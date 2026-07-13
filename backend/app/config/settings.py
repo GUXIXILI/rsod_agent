@@ -47,12 +47,7 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
 
     # ── LLM 配置 ──────────────────────────────────────
-    QWEN_API_KEY: str = ""
-    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    QWEN_MODEL: str = "qwen-plus"
-    USE_LOCAL_LLM: bool = False
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen2.5:7b"
+    LLM_STUB_MODE: bool = True
 
     # ── JWT 认证配置 ──────────────────────────────────
     JWT_SECRET_KEY: str = ""

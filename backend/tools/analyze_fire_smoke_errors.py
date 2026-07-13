@@ -1,4 +1,4 @@
-"""Analyze fire/smoke detection errors and confidence-threshold tradeoffs."""
+"""分析火灾烟雾检测错误以及置信度阈值的精确率与召回率权衡。"""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class MatchResult:
 
 
 class ErrorAnalysisError(RuntimeError):
-    """Raised when error analysis cannot be completed safely."""
+    """错误分析无法安全完成时抛出。"""
 
 
 def parse_thresholds(value: str) -> tuple[float, ...]:

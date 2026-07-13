@@ -1,8 +1,7 @@
-"""Prepare the D-Fire YOLO dataset for the fire/smoke team project.
+"""为团队火灾烟雾项目准备 D-Fire YOLO 数据集。
 
-The source dataset uses class 0=smoke and class 1=fire. The project contract
-uses class 0=fire and class 1=smoke, so every non-empty label is remapped while
-the source directory remains unchanged.
+源数据集使用 0=smoke、1=fire，项目约定使用 0=fire、1=smoke。
+因此脚本会重映射所有非空标签，同时保持源目录内容不变。
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ DATASET_SOURCE_URL = (
 
 
 class DatasetPreparationError(RuntimeError):
-    """Raised when the source dataset cannot be prepared safely."""
+    """源数据集无法安全转换时抛出。"""
 
 
 def _files_by_stem(directory: Path, extensions: set[str]) -> dict[str, Path]:
@@ -263,7 +262,7 @@ def prepare_dataset(source_root: Path, output_root: Path) -> dict:
     print("Writing the remapped dataset...")
     try:
         _write_dataset(staging_root, manifests, report)
-        # data.yaml must reference the final path, not the staging path.
+        # data.yaml 必须引用最终目录，而不是临时写入目录。
         yaml_path = staging_root / "data.yaml"
         yaml_text = yaml_path.read_text(encoding="utf-8").replace(
             staging_root.resolve().as_posix(), output_root.resolve().as_posix(), 1

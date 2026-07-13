@@ -1,193 +1,77 @@
 """
-Chat 服务 LLM 集成测试
-覆盖 _call_llm 正常/异常返回、元组格式验证、send_message 写入、历史上下文、SSE 流式生成器
-使用 pytest + unittest.mock，Mock ChatOpenAI 避免真实 API 调用
+Chat 服务本地占位实现测试
+覆盖占位回复、消息写入、历史上下文和 SSE 流式生成器，确保不会调用外部大模型 API。
 """
 import json
-import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
+from app.config.settings import settings
 from app.services.chat_service import ChatService, chat_service
 from app.entity.db_models import ChatSession, ChatMessage
 
 
-@pytest.fixture(autouse=True)
-def _ensure_llm_settings():
-    """确保 settings 模块有 LLM 相关属性（ChatOpenAI 构造时需要）"""
-    from app.config import settings as _settings_mod
+class TestCallLLMStub:
+    """本地占位回复测试。"""
 
-    attrs = {
-        "QWEN_MODEL": "qwen-plus",
-        "QWEN_API_KEY": "test-key",
-        "QWEN_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    }
-    missing = {}
-    for key, val in attrs.items():
-        if not hasattr(_settings_mod, key):
-            setattr(_settings_mod, key, val)
-            missing[key] = val
-    yield
-    for key in missing:
-        try:
-            delattr(_settings_mod, key)
-        except AttributeError:
-            pass
-
-
-class TestCallLLMNormal:
-    """_call_llm 正常返回测试"""
-
-    @patch("app.services.chat_service.ChatOpenAI")
-    def test_call_llm_returns_content(self, mock_chat_openai_cls):
-        """Mock ChatOpenAI.invoke() 返回含 content 的对象"""
-        mock_response = MagicMock()
-        mock_response.content = "这是 AI 的测试回复"
-        mock_response.usage_metadata = {"total_tokens": 42}
-
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = mock_response
-        mock_chat_openai_cls.return_value = mock_llm
-
-        svc = ChatService()
-        content, tokens_used, latency_ms = svc._call_llm("你好")
-
-        assert content == "这是 AI 的测试回复"
-        assert tokens_used == 42
-        assert latency_ms >= 0
-
-    @patch("app.services.chat_service.ChatOpenAI")
-    def test_call_llm_returns_tuple_format(self, mock_chat_openai_cls):
-        """验证 _call_llm 返回 (content, tokens_used, latency_ms) 三元组"""
-        mock_response = MagicMock()
-        mock_response.content = "回复内容"
-        mock_response.usage_metadata = {"total_tokens": 100}
-
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = mock_response
-        mock_chat_openai_cls.return_value = mock_llm
-
-        svc = ChatService()
-        result = svc._call_llm("测试消息")
+    def test_call_llm_returns_tuple_format(self):
+        """占位实现仍返回内容、估算 token 数和延迟三元组。"""
+        result = ChatService()._call_llm("测试消息")
 
         assert isinstance(result, tuple)
         assert len(result) == 3
         content, tokens_used, latency_ms = result
-        assert isinstance(content, str)
-        assert isinstance(tokens_used, int)
-        assert isinstance(latency_ms, int)
+        assert "本地占位回复" in content
+        assert "未连接真实大模型服务" in content
+        assert tokens_used > 0
+        assert latency_ms >= 0
 
-    @patch("app.services.chat_service.ChatOpenAI")
-    def test_call_llm_no_usage_metadata(self, mock_chat_openai_cls):
-        """当 response 没有 usage_metadata 时 tokens_used 为 0"""
-        mock_response = MagicMock()
-        mock_response.content = "无 token 信息的回复"
-        mock_response.usage_metadata = None
+    def test_call_llm_returns_fire_specific_reply(self):
+        """火灾烟雾关键词返回安全提示。"""
+        content, _, _ = ChatService()._call_llm("检测到烟雾应该怎么办")
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = mock_response
-        mock_chat_openai_cls.return_value = mock_llm
+        assert "火灾烟雾检测相关问题" in content
+        assert "人工复核" in content
 
-        svc = ChatService()
-        content, tokens_used, latency_ms = svc._call_llm("测试")
+    def test_call_llm_history_is_reflected_without_external_request(self):
+        """存在历史上下文时，占位回复明确说明已读取上下文。"""
+        history = [{"role": "user", "content": "之前的问题"}]
+        content, _, _ = ChatService()._call_llm("继续", history=history)
 
-        assert content == "无 token 信息的回复"
-        assert tokens_used == 0
+        assert "会话上下文" in content
 
-    @patch("app.services.chat_service.ChatOpenAI")
-    def test_call_llm_usage_metadata_missing_total_tokens(self, mock_chat_openai_cls):
-        """usage_metadata 存在但缺少 total_tokens 键"""
-        mock_response = MagicMock()
-        mock_response.content = "回复"
-        mock_response.usage_metadata = {"input_tokens": 10}
+    def test_call_llm_is_deterministic(self):
+        """相同输入应得到完全一致的本地回复。"""
+        first = ChatService()._call_llm("普通问题")[0]
+        second = ChatService()._call_llm("普通问题")[0]
 
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = mock_response
-        mock_chat_openai_cls.return_value = mock_llm
+        assert first == second
 
-        svc = ChatService()
-        content, tokens_used, latency_ms = svc._call_llm("测试")
+    def test_stub_mode_is_enabled_by_default(self):
+        """默认配置必须启用本地占位模式。"""
+        assert settings.LLM_STUB_MODE is True
 
-        assert tokens_used == 0
+    def test_call_llm_accepts_empty_content(self):
+        """空内容仍返回合法占位回复，不触发外部请求。"""
+        content, tokens_used, latency_ms = ChatService()._call_llm("")
 
+        assert "本地占位回复" in content
+        assert tokens_used > 0
+        assert latency_ms >= 0
 
-class TestCallLLMException:
-    """_call_llm 异常处理测试"""
+    def test_call_llm_truncates_echoed_content(self):
+        """普通消息只回显前 50 个字符，避免占位回复无限增长。"""
+        content, _, _ = ChatService()._call_llm("A" * 60)
 
-    @patch("app.services.chat_service.ChatOpenAI")
-    def test_call_llm_exception_returns_friendly_error(self, mock_chat_openai_cls):
-        """Mock 抛出异常时返回友好错误信息"""
-        mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("API rate limit exceeded")
-        mock_chat_openai_cls.return_value = mock_llm
+        assert "A" * 50 in content
+        assert "A" * 51 not in content
 
-        svc = ChatService()
-        content, tokens_used, latency_ms = svc._call_llm("你好")
+    def test_call_llm_token_estimate_is_stable(self):
+        """相同输入的 token 估算值保持稳定。"""
+        first = ChatService()._call_llm("稳定性测试")[1]
+        second = ChatService()._call_llm("稳定性测试")[1]
 
-        assert "AI 服务暂时不可用" in content
-        assert "请稍后重试" in content
-        assert tokens_used == 0
-        assert latency_ms == 0
-
-    @patch("app.services.chat_service.ChatOpenAI")
-    def test_call_llm_constructor_exception(self, mock_chat_openai_cls):
-        """ChatOpenAI 构造时抛异常（如无效 API Key）"""
-        mock_chat_openai_cls.side_effect = ValueError("Invalid API key")
-
-        svc = ChatService()
-        content, tokens_used, latency_ms = svc._call_llm("你好")
-
-        assert "AI 服务暂时不可用" in content
-        assert tokens_used == 0
-
-
-class TestCallLLMWithHistory:
-    """_call_llm 历史上下文测试"""
-
-    @patch("app.services.chat_service.ChatOpenAI")
-    def test_call_llm_with_history(self, mock_chat_openai_cls):
-        """验证 history 参数正确传递给 LLM"""
-        mock_response = MagicMock()
-        mock_response.content = "带上下文的回复"
-        mock_response.usage_metadata = {"total_tokens": 50}
-
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = mock_response
-        mock_chat_openai_cls.return_value = mock_llm
-
-        svc = ChatService()
-        history = [
-            {"role": "user", "content": "之前的问题"},
-            {"role": "assistant", "content": "之前的回复"},
-        ]
-        content, tokens_used, latency_ms = svc._call_llm("新问题", history=history)
-
-        assert content == "带上下文的回复"
-        # 验证 invoke 被调用，且 messages 包含 system + 2 history + 1 current = 4 条
-        call_args = mock_llm.invoke.call_args
-        messages = call_args[0][0]
-        assert len(messages) == 4
-
-    @patch("app.services.chat_service.ChatOpenAI")
-    def test_call_llm_history_truncated_to_10(self, mock_chat_openai_cls):
-        """历史消息最多取最近 10 条"""
-        mock_response = MagicMock()
-        mock_response.content = "回复"
-        mock_response.usage_metadata = {"total_tokens": 20}
-
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = mock_response
-        mock_chat_openai_cls.return_value = mock_llm
-
-        svc = ChatService()
-        history = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"消息{i}"} for i in range(15)]
-        svc._call_llm("新消息", history=history)
-
-        call_args = mock_llm.invoke.call_args
-        messages = call_args[0][0]
-        # system(1) + history[-10:](10) + current(1) = 12
-        assert len(messages) == 12
+        assert first == second
+        assert isinstance(first, int)
 
 
 class TestSendMessageWithLLM:
@@ -264,24 +148,8 @@ class TestSendMessageStream:
         data.content = "流式测试消息"
         data.session_id = session.id
 
-        with patch("app.services.chat_service.ChatOpenAI") as mock_cls, \
-             patch("app.database.session.SessionLocal") as mock_session_local:
+        with patch("app.database.session.SessionLocal") as mock_session_local:
             mock_session_local.return_value = db_session
-            mock_llm = MagicMock()
-
-            async def fake_astream(messages):
-                mock_chunk1 = MagicMock()
-                mock_chunk1.content = "你好"
-                mock_chunk1.usage_metadata = None
-                yield mock_chunk1
-                mock_chunk2 = MagicMock()
-                mock_chunk2.content = "世界"
-                mock_chunk2.usage_metadata = None
-                yield mock_chunk2
-
-            mock_llm.astream = fake_astream
-            mock_cls.return_value = mock_llm
-
             events = []
             async for event in chat_service.send_message_stream(
                 create_test_user.id, data, session_id=session.id
@@ -322,20 +190,8 @@ class TestSendMessageStream:
         data.content = "自动创建会话测试"
         data.session_id = None
 
-        with patch("app.services.chat_service.ChatOpenAI") as mock_cls, \
-             patch("app.database.session.SessionLocal") as mock_session_local:
+        with patch("app.database.session.SessionLocal") as mock_session_local:
             mock_session_local.return_value = db_session
-            mock_llm = MagicMock()
-
-            async def fake_astream(messages):
-                mock_chunk = MagicMock()
-                mock_chunk.content = "回复"
-                mock_chunk.usage_metadata = None
-                yield mock_chunk
-
-            mock_llm.astream = fake_astream
-            mock_cls.return_value = mock_llm
-
             events = []
             async for event in chat_service.send_message_stream(
                 create_test_user.id, data, session_id=None

@@ -1,4 +1,4 @@
-"""Run reproducible YOLO training for the fire/smoke detection dataset."""
+"""为火灾烟雾检测数据集执行可复现的 YOLO 训练。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ EXPECTED_CLASS_NAMES = {0: "fire", 1: "smoke"}
 
 
 class TrainingConfigurationError(RuntimeError):
-    """Raised when a formal training run is not configured safely."""
+    """正式训练任务配置不安全或不完整时抛出。"""
 
 
 def _normalize_names(names: Any) -> dict[int, str]:

@@ -1,4 +1,4 @@
-"""Fire/smoke YOLO inference and temporal confirmation services."""
+"""火灾烟雾 YOLO 推理与连续帧确认服务。"""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class ConfirmationState:
 
 
 class FireSmokeDetectionService:
-    """Load one YOLO model lazily and apply per-class thresholds."""
+    """懒加载单个 YOLO 模型，并按类别应用独立置信度阈值。"""
 
     def __init__(
         self,
@@ -181,7 +181,7 @@ class FireSmokeDetectionService:
 
 
 class TemporalConfirmationTracker:
-    """Confirm a class only after it appears in consecutive frames."""
+    """仅当某类别连续出现指定帧数后才确认该类别。"""
 
     def __init__(self, required_frames: Mapping[str, int]) -> None:
         self.required_frames = {
@@ -226,7 +226,7 @@ class _TrackerEntry:
 
 
 class VideoConfirmationRegistry:
-    """Keep short-lived confirmation state for independent video streams."""
+    """为相互独立的视频流保存短期连续帧确认状态。"""
 
     def __init__(self, idle_timeout_seconds: float = 600.0) -> None:
         self.idle_timeout_seconds = idle_timeout_seconds

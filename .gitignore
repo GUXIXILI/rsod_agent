@@ -80,6 +80,10 @@ tmp_*.json
 # ── 训练输出和数据集（不提交大文件）──────────────────────
 runs/
 datasets/
+*.pt
+*.pth
+*.pkl
+*.bin
 !datasets/rsod/yolo_dataset/data.yaml
 
 _temp_diff.txt
