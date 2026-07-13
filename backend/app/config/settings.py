@@ -47,12 +47,7 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
 
     # ── LLM 配置 ──────────────────────────────────────
-    QWEN_API_KEY: str = ""
-    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    QWEN_MODEL: str = "qwen-plus"
-    USE_LOCAL_LLM: bool = False
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen2.5:7b"
+    LLM_STUB_MODE: bool = True
 
     # ── JWT 认证配置 ──────────────────────────────────
     JWT_SECRET_KEY: str = ""
@@ -72,6 +67,18 @@ class Settings(BaseSettings):
     # ── 训练配置 ──────────────────────────────────────
     TRAIN_OUTPUT_DIR: str = "runs/train"  # 训练输出目录（模型权重、日志等）
     DATASET_BASE_DIR: str = "datasets"    # 数据集根目录
+
+    # Fire/smoke inference configuration
+    FIRE_SMOKE_MODEL_PATH: str = (
+        "runs/fire_smoke/yolo11n_e50_b16_s42/weights/best.pt"
+    )
+    FIRE_SMOKE_DEVICE: str = "0"
+    FIRE_SMOKE_IMAGE_FIRE_THRESHOLD: float = 0.25
+    FIRE_SMOKE_IMAGE_SMOKE_THRESHOLD: float = 0.20
+    FIRE_SMOKE_VIDEO_FIRE_THRESHOLD: float = 0.20
+    FIRE_SMOKE_VIDEO_SMOKE_THRESHOLD: float = 0.20
+    FIRE_SMOKE_FIRE_CONFIRM_FRAMES: int = 3
+    FIRE_SMOKE_SMOKE_CONFIRM_FRAMES: int = 3
 
     # ── 定时任务配置 ──────────────────────────────────
     SCHEDULER_ENABLED: bool = False       # 是否启用定时任务（如定时清理过期检测记录）

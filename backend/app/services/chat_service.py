@@ -8,12 +8,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import HTTPException
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.entity.db_models import ChatSession, ChatMessage
 from app.core.logger import get_logger
 
@@ -210,59 +207,37 @@ class ChatService:
             raise HTTPException(status_code=404, detail="会话不存在或无权访问")
         return session
 
+    @staticmethod
+    def _build_stub_reply(content: str, history: list = None) -> str:
+        """根据输入生成确定性的本地占位回复，不访问任何外部大模型服务。"""
+        normalized = content.strip()
+        if any(keyword in normalized for keyword in ("火", "烟", "告警", "检测")):
+            return (
+                "这是本地占位回复：已收到火灾烟雾检测相关问题。"
+                "当前版本未连接真实大模型服务，请结合检测结果和人工复核进行处理。"
+            )
+        history_hint = "，并已读取最近的会话上下文" if history else ""
+        return (
+            f"这是本地占位回复：已收到你的消息“{normalized[:50]}”{history_hint}。"
+            "当前版本未连接真实大模型服务。"
+        )
+
     def _call_llm(self, content: str, history: list = None) -> tuple:
         """
-        调用 DashScope LLM（通过 langchain-openai 兼容接口）
+        使用本地占位实现生成回复。
 
-        Args:
+        参数:
             content: 用户消息内容
             history: 历史消息列表 [{"role": "user/assistant", "content": "..."}]
 
-        Returns:
-            tuple: (回复内容, tokens_used, latency_ms)
+        返回:
+            tuple: (回复内容, 估算 token 数, 延迟毫秒数)
         """
-        try:
-            llm = ChatOpenAI(
-                model=settings.QWEN_MODEL,
-                api_key=settings.QWEN_API_KEY,
-                base_url=settings.QWEN_BASE_URL,
-                temperature=0.7,
-                max_tokens=2000,
-            )
-
-            # 构建消息列表
-            messages = [
-                SystemMessage(
-                    content="你是火灾烟雾智能检测平台的AI助手，能够帮助用户进行火灾检测相关的问答、"
-                    "数据查询和分析。请用中文回答。"
-                )
-            ]
-
-            # 添加历史上下文（最近10条）
-            if history:
-                for msg in history[-10:]:
-                    if msg["role"] == "user":
-                        messages.append(HumanMessage(content=msg["content"]))
-                    elif msg["role"] == "assistant":
-                        messages.append(AIMessage(content=msg["content"]))
-
-            # 添加当前用户消息
-            messages.append(HumanMessage(content=content))
-
-            start_time = time.time()
-            response = llm.invoke(messages)
-            latency_ms = int((time.time() - start_time) * 1000)
-
-            # 获取 token 用量
-            tokens_used = 0
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
-                tokens_used = response.usage_metadata.get("total_tokens", 0)
-
-            return response.content, tokens_used, latency_ms
-
-        except Exception as e:
-            logger.error("LLM调用失败: %s", e)
-            return "AI 服务暂时不可用，请稍后重试。", 0, 0
+        start_time = time.time()
+        reply = self._build_stub_reply(content, history)
+        latency_ms = int((time.time() - start_time) * 1000)
+        tokens_used = max(1, (len(content) + len(reply)) // 2)
+        return reply, tokens_used, latency_ms
 
 
     async def send_message_stream(self, user_id: int, data, session_id: int = None):
@@ -317,49 +292,15 @@ class ChatService:
             # 发送 start 事件
             yield f"event: start\ndata: {json.dumps({'session_id': session.id, 'message_id': user_msg.id}, ensure_ascii=False)}\n\n"
 
-            # 初始化 LLM
-            llm = ChatOpenAI(
-                model=settings.QWEN_MODEL,
-                api_key=settings.QWEN_API_KEY,
-                base_url=settings.QWEN_BASE_URL,
-                temperature=0.7,
-                max_tokens=2000,
-            )
-
-            # 构建消息列表
-            messages = [
-                SystemMessage(
-                    content="你是火灾烟雾智能检测平台的AI助手，能够帮助用户进行火灾检测相关的问答、"
-                    "数据查询和分析。请用中文回答。"
-                )
-            ]
-            if history:
-                for msg in history:
-                    if msg["role"] == "user":
-                        messages.append(HumanMessage(content=msg["content"]))
-                    elif msg["role"] == "assistant":
-                        messages.append(AIMessage(content=msg["content"]))
-            messages.append(HumanMessage(content=data.content))
-
-            # 流式输出
-            full_content = ""
+            # 占位回复按固定长度切片，保持 SSE 接口的流式事件契约。
+            full_content = self._build_stub_reply(data.content, history)
             start_time = time.time()
-            tokens_used = 0
-            last_chunk = None
-
-            async for chunk in llm.astream(messages):
-                if chunk.content:
-                    full_content += chunk.content
-                    yield f"event: token\ndata: {json.dumps({'content': chunk.content}, ensure_ascii=False)}\n\n"
-                last_chunk = chunk
+            for offset in range(0, len(full_content), 8):
+                chunk = full_content[offset : offset + 8]
+                yield f"event: token\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
 
             latency_ms = int((time.time() - start_time) * 1000)
-
-            # 尝试从最后一个 chunk 获取 token 用量，否则简单估算
-            if last_chunk and hasattr(last_chunk, "usage_metadata") and last_chunk.usage_metadata:
-                tokens_used = last_chunk.usage_metadata.get("total_tokens", 0)
-            if tokens_used == 0 and full_content:
-                tokens_used = len(full_content) // 2  # 简单估算中文字符
+            tokens_used = max(1, (len(data.content) + len(full_content)) // 2)
 
             # 存储 AI 回复到数据库
             assistant_msg = ChatMessage(
