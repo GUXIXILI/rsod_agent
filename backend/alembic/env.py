@@ -11,15 +11,25 @@ from pathlib import Path
 # __file__ = alembic/env.py, __file__.parent = alembic/, __file__.parent.parent = backend/
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import os
+
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
+config = context.config
+
+# Docker 容器内通过环境变量动态设置数据库连接地址
+# 本地开发时 alembic.ini 中的 sqlalchemy.url 仍然有效
+database_url = os.environ.get(
+    'DATABASE_URL',
+    'postgresql://rsod_admin:rsod_admin@postgres:5432/rsod_agent'
+)
+config.set_main_option('sqlalchemy.url', database_url)
+
 # 导入 SQLAlchemy 的 Base 类，用于获取模型元数据
 from app.database.session import Base
 # 关键：导入所有模型模块，触发模型类的定义和注册
 # 模型类继承自 Base，会自动注册到 Base.metadata 中
 from app.entity import db_models
-
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
-config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
