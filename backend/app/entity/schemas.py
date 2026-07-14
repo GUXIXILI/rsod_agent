@@ -350,6 +350,23 @@ class ModelEvaluationResponse(BaseModel):
     model_config = {"protected_namespaces": ()}
 
 
+class ModelExportRequest(BaseModel):
+    """模型导出请求。"""
+    format: Literal["onnx", "torchscript"] = "onnx"
+    imgsz: int = Field(default=640, ge=320, le=1280, multiple_of=32)
+    device: str = Field(default="cpu", pattern=r"^(cpu|\d+)$")
+
+
+class ModelExportResponse(BaseModel):
+    """模型导出响应。"""
+    model_version_id: int
+    format: str
+    file_name: str
+    file_size: int
+
+    model_config = {"protected_namespaces": ()}
+
+
 # ══════════════════════════════════════════════════════════════
 # 四、智能体对话
 # ══════════════════════════════════════════════════════════════
