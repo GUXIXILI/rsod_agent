@@ -3,9 +3,9 @@ import pytest
 from app.entity.db_models import DetectionScene, ModelVersion
 from app.services.model_evaluation_service import (
     ModelEvaluationError,
+    evaluate_and_save_model,
     save_evaluation_result,
 )
-
 
 def _create_model_version(db_session, tmp_path):
     model_path = tmp_path / "best.pt"
@@ -101,3 +101,47 @@ def test_save_evaluation_result_rejects_model_path_mismatch(
             model_version_id=version.id,
             report=_report(other_model),
         )
+
+def test_evaluate_and_save_model_uses_database_model_path(
+    db_session, tmp_path, monkeypatch
+):
+    version, model_path = _create_model_version(
+        db_session, tmp_path
+    )
+    data_path = tmp_path / "data.yaml"
+    output_dir = tmp_path / "evaluation"
+    report = _report(model_path)
+    captured = {}
+
+    def fake_evaluate_model(**kwargs):
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(
+        "app.services.model_evaluation_service.evaluate_model",
+        fake_evaluate_model,
+    )
+
+    updated, returned_report = evaluate_and_save_model(
+        db_session,
+        model_version_id=version.id,
+        data_path=data_path,
+        output_dir=output_dir,
+        split="val",
+        imgsz=640,
+        batch=8,
+        device="cpu",
+    )
+
+    assert captured == {
+        "model_path": model_path,
+        "data_path": data_path,
+        "output_dir": output_dir,
+        "split": "val",
+        "imgsz": 640,
+        "batch": 8,
+        "device": "cpu",
+    }
+    assert updated.id == version.id
+    assert updated.map50 == pytest.approx(0.760)
+    assert returned_report is report

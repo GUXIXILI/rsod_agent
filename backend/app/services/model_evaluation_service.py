@@ -200,6 +200,7 @@ def evaluate_model(
     )
     return report
 
+
 def _validated_report_metrics(report: dict) -> dict:
     """校验准备写入数据库的评估指标。"""
     if not isinstance(report, Mapping):
@@ -301,3 +302,44 @@ def save_evaluation_result(
         raise
 
     return model_version
+
+
+def evaluate_and_save_model(
+    db,
+    model_version_id: int,
+    data_path: str | Path,
+    output_dir: str | Path,
+    split: str = "val",
+    imgsz: int = 640,
+    batch: int = 16,
+    device: str = "cpu",
+) -> tuple[ModelVersion, dict]:
+    """使用数据库记录的模型路径执行评估并保存指标。"""
+    model_version = (
+        db.query(ModelVersion)
+        .filter(ModelVersion.id == model_version_id)
+        .first()
+    )
+    if model_version is None:
+        raise ModelEvaluationError(
+            f"Model version not found: {model_version_id}"
+        )
+
+    model_path = Path(model_version.model_path)
+
+    report = evaluate_model(
+        model_path=model_path,
+        data_path=Path(data_path),
+        output_dir=Path(output_dir),
+        split=split,
+        imgsz=imgsz,
+        batch=batch,
+        device=device,
+    )
+
+    updated = save_evaluation_result(
+        db,
+        model_version_id=model_version_id,
+        report=report,
+    )
+    return updated, report
