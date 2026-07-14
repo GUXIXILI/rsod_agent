@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database.session import Base, get_db
 from app.entity.db_models import User
 from app.core.security import hash_password
+from app.config.settings import settings
 
 # 创建 SQLite 内存数据库引擎（测试专用，不连接 PostgreSQL）
 TEST_DATABASE_URL = "sqlite:///./test.db"
@@ -67,7 +68,10 @@ def client(db_session):
     提供 FastAPI TestClient
     使用 SQLite 测试数据库替代 PostgreSQL
     """
-    from main import app
+    import main as main_module
+    from app.middleware.audit_log import AuditLogMiddleware
+
+    app = main_module.app
 
     # 覆盖 get_db 依赖，使用测试数据库
     def override_get_db():
@@ -76,10 +80,25 @@ def client(db_session):
         finally:
             pass
 
+    original_jwt_secret = settings.JWT_SECRET_KEY
+    original_init_minio = main_module.init_minio
+    original_save_log = AuditLogMiddleware._save_log
+    settings.JWT_SECRET_KEY = (
+        "test-only-jwt-secret-key-"
+        "0123456789abcdef0123456789abcdef"
+    )
+    main_module.init_minio = lambda: None
+    AuditLogMiddleware._save_log = lambda self, **kwargs: None
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+        settings.JWT_SECRET_KEY = original_jwt_secret
+        main_module.init_minio = original_init_minio
+        AuditLogMiddleware._save_log = original_save_log
 
 
 @pytest.fixture

@@ -10,18 +10,27 @@
 - GET  /api/training/results/{task_uuid} — 下载 results.csv
 """
 import os
+from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
+from app.config.settings import settings
 from app.core.logger import get_logger
 from app.database.session import get_db
-from app.entity.db_models import DetectionScene, TrainingTask
+from app.entity.db_models import DetectionScene, ModelVersion, TrainingTask
 from app.entity.schemas import (
+    ModelEvaluationRequest,
+    ModelEvaluationResponse,
     TrainingMetricResponse,
     TrainingTaskCreate,
     TrainingTaskResponse,
+)
+from app.services.model_evaluation_service import (
+    ModelEvaluationError,
+    evaluate_and_save_model,
 )
 from app.training.training_service import training_service
 
@@ -283,3 +292,78 @@ def get_training_results(
         )
 
     return result
+
+
+@router.post(
+    "/models/{model_version_id}/evaluate",
+    response_model=ModelEvaluationResponse,
+)
+def evaluate_model_version(
+    model_version_id: int,
+    request: ModelEvaluationRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """运行模型评估并将指标写入模型版本记录。"""
+    model_version = (
+        db.query(ModelVersion)
+        .filter(ModelVersion.id == model_version_id)
+        .first()
+    )
+    if model_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="模型版本不存在",
+        )
+
+    owns_training_task = (
+        model_version.training_task is not None
+        and model_version.training_task.user_id == current_user.id
+    )
+    owns_scene = (
+        model_version.scene is not None
+        and model_version.scene.created_by == current_user.id
+    )
+    if not current_user.is_superuser and not (
+        owns_training_task or owns_scene
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权评估此模型版本",
+        )
+
+    data_path = (
+        Path(settings.DATASET_BASE_DIR)
+        / model_version.scene.name
+        / "yolo_dataset"
+        / "data.yaml"
+    )
+    output_dir = (
+        Path(settings.TRAIN_OUTPUT_DIR)
+        / "evaluations"
+        / str(model_version.id)
+        / uuid4().hex
+    )
+
+    try:
+        updated, report = evaluate_and_save_model(
+            db,
+            model_version_id=model_version.id,
+            data_path=data_path,
+            output_dir=output_dir,
+            split=request.split,
+            imgsz=request.imgsz,
+            batch=request.batch,
+            device=request.device,
+        )
+    except ModelEvaluationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "model_version_id": updated.id,
+        "metrics": report["metrics"],
+        "artifacts": report["artifacts"],
+    }

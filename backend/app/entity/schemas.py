@@ -8,7 +8,7 @@ Pydantic 请求/响应模型
   - List 模型：分页列表查询的参数和响应
 """
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -322,6 +322,32 @@ class ModelVersionCreate(BaseModel):
     model_name: str = Field(..., description="模型名称")
     model_type: str = Field(default="yolov11n", description="模型类型")
     description: Optional[str] = None
+
+
+class ModelEvaluationRequest(BaseModel):
+    """模型评估请求。"""
+    split: Literal["val", "test"] = "val"
+    imgsz: int = Field(default=640, ge=320, le=1280, multiple_of=32)
+    batch: int = Field(default=16, ge=1, le=64)
+    device: str = Field(default="cpu", pattern=r"^(cpu|\d+)$")
+
+
+class ModelEvaluationMetricsResponse(BaseModel):
+    """模型评估指标响应。"""
+    precision: float
+    recall: float
+    map50: float
+    map50_95: float
+    per_class_ap: dict[str, float]
+
+
+class ModelEvaluationResponse(BaseModel):
+    """模型评估响应。"""
+    model_version_id: int
+    metrics: ModelEvaluationMetricsResponse
+    artifacts: dict[str, str]
+
+    model_config = {"protected_namespaces": ()}
 
 
 # ══════════════════════════════════════════════════════════════
