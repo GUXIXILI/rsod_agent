@@ -1,84 +1,113 @@
-version: "3.8"
-
-services:
-  # ── PostgreSQL + Pgvector ──────────────────────────
+﻿services:
   postgres:
-    image: pgvector/pgvector:pg15
+    image: postgres:15-alpine
     container_name: glw-rsod-agent-postgres
-    restart: unless-stopped
     environment:
-      POSTGRES_DB: rsod_agent
       POSTGRES_USER: rsod_admin
       POSTGRES_PASSWORD: rsod_admin
+      POSTGRES_DB: rsod_agent
     ports:
       - "5433:5432"
     volumes:
       - glw-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rsod_admin -d rsod_agent"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U rsod_admin"]
+      interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - glw-rsod-network
 
-  # ── Redis ──────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: glw-rsod-agent-redis
-    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
       - glw-redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - glw-rsod-network
 
-  # ── MinIO 对象存储 ─────────────────────────────────
   minio:
     image: minio/minio:latest
     container_name: glw-rsod-agent-minio
-    restart: unless-stopped
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000" # API 端口
-      - "9001:9001" # Console 端口
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - glw-minio-data:/data
     command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
       retries: 3
+    networks:
+      - glw-rsod-network
 
-  # ── Ollama 本地 LLM（可选）─────────────────────────
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: glw-rsod-agent-ollama
-  #   restart: unless-stopped
-  #   ports:
-  #     - "11434:11434"
-  #   volumes:
-  #     - glw-ollama-data:/root/.ollama
-  # GPU 加速（取消注释以启用 NVIDIA GPU 支持）
-  # deploy:
-  #   resources:
-  #     reservations:
-  #       devices:
-  #         - driver: nvidia
-  #           count: all
-  #           capabilities: [gpu]
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: glw-rsod-agent-backend
+    environment:
+      DATABASE_URL: postgresql://rsod_admin:rsod_admin@postgres:5432/rsod_agent
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: fire-detection-images
+      JWT_SECRET_KEY: change_this_secret_key_in_production_min_32_chars
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      LLM_STUB_MODE: "true"
+      DEBUG: "false"
+      APP_NAME: "Fire & Smoke Detection Platform"
+      ALLOWED_ORIGINS: "http://localhost:80,http://localhost:5173,http://localhost:3000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    # ⚠️ 注意：command 必须与 build、environment、ports 同级，不能放在 volumes 下面
+    command: sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+    networks:
+      - glw-rsod-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: glw-rsod-agent-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - glw-rsod-network
 
 networks:
-  default:
-    name: glw-rsod-network
+  glw-rsod-network:
+    external: true
 
 volumes:
   glw-postgres-data:
+    external: true
   glw-redis-data:
+    external: true
   glw-minio-data:
-  glw-ollama-data:
+    external: true
