@@ -78,6 +78,7 @@ def export_model_version(
             device=device,
             half=False,
             simplify=False,
+            opset=18,
         )
     except Exception as exc:
         raise ModelArtifactError(

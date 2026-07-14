@@ -67,6 +67,7 @@ def test_export_model_version_calls_ultralytics(
         "device": "cpu",
         "half": False,
         "simplify": False,
+        "opset": 18,
     }]
 
 
