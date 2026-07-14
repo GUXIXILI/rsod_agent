@@ -581,7 +581,7 @@ function initCharts() {
 async function fetchMetrics() {
   if (!selectedTask.value) return;
   try {
-    const taskId = selectedTask.value.id || selectedTask.value.task?.id;
+    const taskId = selectedTask.value.task_uuid;
     const res = await request.get(`/training/metrics/${taskId}`);
     const metrics = res.metrics || [];
 
@@ -842,7 +842,7 @@ async function validateModel() {
   if (!selectedTask.value) return;
   validating.value = true;
   try {
-    const taskId = selectedTask.value.id || selectedTask.value.task?.id;
+    const taskId = selectedTask.value.task_uuid;
     // 评估需要运行 model.val()，在 CPU 上需要较长时间（30-120秒），增加超时到 5 分钟
     const res = await request.post(
       `/training/validate/${taskId}`,
@@ -870,7 +870,7 @@ async function exportModel() {
   if (!selectedTask.value) return;
   exporting.value = true;
   try {
-    const taskId = selectedTask.value.id || selectedTask.value.task?.id;
+    const taskId = selectedTask.value.task_uuid;
     const res = await request.post(
       `/training/export/${taskId}`,
       exportForm.value,
@@ -889,7 +889,7 @@ async function exportModel() {
 async function downloadModel() {
   if (!selectedTask.value) return;
   try {
-    const taskId = selectedTask.value.id || selectedTask.value.task?.id;
+    const taskId = selectedTask.value.task_uuid;
     // 使用 fetch 下载文件（需要携带 Token）
     const token = localStorage.getItem("token") || "";
     const response = await fetch(`/training/download/${taskId}`, {
@@ -922,10 +922,10 @@ async function runPredict() {
   if (!predictFile.value || !selectedTask.value) return;
   predicting.value = true;
   try {
-    const taskId = selectedTask.value.id || selectedTask.value.task?.id;
+    const taskId = selectedTask.value.task_uuid;
     const formData = new FormData();
     formData.append("file", predictFile.value);
-    formData.append("task_id", taskId);
+    formData.append("task_uuid", taskId);
     formData.append("conf", predictConf.value);
     formData.append("iou", predictIou.value);
 

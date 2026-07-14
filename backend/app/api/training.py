@@ -321,10 +321,10 @@ def _get_model_path() -> Path:
 
 
 def _verify_training_task(
-    db: Session, task_id: int, user_id: int
+    db: Session, task_uuid: str, user_id: int
 ) -> TrainingTask:
     """校验训练任务存在且属于当前用户。"""
-    task = db.query(TrainingTask).filter(TrainingTask.id == task_id).first()
+    task = db.query(TrainingTask).filter(TrainingTask.task_uuid == task_uuid).first()
     if task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="训练任务不存在"
@@ -336,9 +336,9 @@ def _verify_training_task(
     return task
 
 
-@router.post("/validate/{task_id}")
+@router.post("/validate/{task_uuid}")
 def validate_model(
-    task_id: int,
+    task_uuid: str,
     payload: ValidateRequest,
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -349,7 +349,7 @@ def validate_model(
     当前版本返回模拟评估结果，保证前端"评估模型"按钮可正常交互。
     后续可替换为真实 model.val() 调用。
     """
-    _verify_training_task(db, task_id, current_user.id)
+    _verify_training_task(db, task_uuid, current_user.id)
 
     # 占位数据：基于 yubai 分支模型在验证集上的合理近似指标
     return {
@@ -367,9 +367,9 @@ def validate_model(
     }
 
 
-@router.post("/export/{task_id}")
+@router.post("/export/{task_uuid}")
 def export_model(
-    task_id: int,
+    task_uuid: str,
     payload: ExportRequest,
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -380,26 +380,25 @@ def export_model(
     当前版本返回导出成功信息，保证前端"导出模型"按钮可正常交互。
     后续可替换为真实模型格式转换（ONNX/TensorRT 等）。
     """
-    task = _verify_training_task(db, task_id, current_user.id)
+    task = _verify_training_task(db, task_uuid, current_user.id)
     model_path = _get_model_path()
     return {
         "message": "模型导出成功",
-        "task_id": task_id,
-        "task_uuid": task.task_uuid,
+        "task_uuid": task_uuid,
         "format": "pt",
         "model_path": str(model_path),
-        "download_url": f"/api/training/download/{task_id}",
+        "download_url": f"/api/training/download/{task_uuid}",
     }
 
 
-@router.get("/download/{task_id}")
+@router.get("/download/{task_uuid}")
 def download_model(
-    task_id: int,
+    task_uuid: str,
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """下载模型权重文件（当前返回 yubai 分支合并后的 best.pt）。"""
-    task = _verify_training_task(db, task_id, current_user.id)
+    task = _verify_training_task(db, task_uuid, current_user.id)
     model_path = _get_model_path()
     if not model_path.is_file():
         raise HTTPException(
@@ -416,7 +415,7 @@ def download_model(
 @router.post("/predict")
 async def predict_with_model(
     file: UploadFile = File(..., description="测试图片"),
-    task_id: int = Form(..., description="训练任务 ID"),
+    task_uuid: str = Form(..., description="训练任务 UUID"),
     conf: float = Form(0.25, ge=0.0, le=1.0),
     iou: float = Form(0.45, ge=0.0, le=1.0),
     current_user=Depends(get_current_user),
@@ -428,7 +427,7 @@ async def predict_with_model(
     当前使用 yubai 分支合并后的火灾烟雾模型进行推理，CPU 兜底，
     返回绘制检测框后的图片 Base64 以及目标列表。
     """
-    task = _verify_training_task(db, task_id, current_user.id)
+    task = _verify_training_task(db, task_uuid, current_user.id)
 
     # 读取上传图片
     try:
