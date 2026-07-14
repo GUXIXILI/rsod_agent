@@ -1,128 +1,130 @@
 /**
- * SSE 流式处理工具
- * 使用 fetch + ReadableStream + AbortController 实现
+ * SSE (Server-Sent Events) 流式处理工具
+ * 用于 Day 11 智能体对话的流式渲染
+ *
+ * 使用方式：
+ *   const stop = streamChat(
+ *     '/api/chat/stream',
+ *     { message: '你好' },
+ *     {
+ *       onMessage: (chunk) => { content += chunk },
+ *       onDone: () => { console.log('完成') },
+ *       onError: (err) => { console.error(err) },
+ *     }
+ *   )
  */
 
 /**
- * 发送流式聊天请求，通过 SSE 逐条接收消息
+ * 发起 SSE 流式请求
  *
- * @param {string} url - 请求地址
- * @param {object} body - POST 请求体（JSON 对象）
- * @param {object} callbacks - 回调函数集合
- * @param {function} callbacks.onMessage - 收到一条消息时调用，参数为解析后的 JSON 数据
- * @param {function} callbacks.onDone - 流结束时调用
- * @param {function} callbacks.onError - 发生错误时调用，参数为 error 对象
- * @returns {{ stop: function }} 返回包含 stop 方法的对象，调用 stop 可中断连接
+ * @param {string} url - 请求地址（相对路径，会经过 Vite proxy）
+ * @param {Object} body - 请求体
+ * @param {Object} callbacks - 回调函数
+ * @param {Function} callbacks.onMessage - 收到消息片段时的回调
+ * @param {Function} callbacks.onDone - 流结束时的回调
+ * @param {Function} callbacks.onError - 错误时的回调
+ * @returns {Function} stop - 调用此函数可中断连接
  */
 export function streamChat(url, body, callbacks) {
-  const { onMessage, onDone, onError } = callbacks
+  const { onMessage, onDone, onError } = callbacks;
 
-  // 创建 AbortController 用于中断请求
-  const abortController = new AbortController()
+  // 从 localStorage 获取 Token
+  const token = localStorage.getItem("rsod_token");
 
-  // 从 localStorage 读取 token
-  const token = localStorage.getItem('token')
+  // 使用 fetch + ReadableStream 实现 SSE
+  const controller = new AbortController();
 
-  // 发起 POST 请求
   fetch(url, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(body),
-    signal: abortController.signal
+    signal: controller.signal,
   })
     .then(async (response) => {
-      // 检查响应状态
       if (!response.ok) {
-        throw new Error(`HTTP 错误: ${response.status} ${response.statusText}`)
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      // 获取 ReadableStream 的 reader
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder('utf-8')
-      let buffer = ''
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
 
-      // 逐块读取数据
+      // 缓冲区：用于拼接跨 chunk 的不完整 SSE 消息
+      let buffer = "";
+
       while (true) {
-        const { done, value } = await reader.read()
-
-        // 流结束
+        const { done, value } = await reader.read();
         if (done) {
-          // 处理 buffer 中可能残留的数据
+          // 流结束，处理缓冲区剩余数据
           if (buffer.trim()) {
-            const lines = buffer.split('\n')
-            for (const line of lines) {
-              processLine(line.trim(), onMessage, onDone)
-            }
+            processSSEMessage(buffer, onMessage);
           }
-          onDone && onDone()
-          break
+          onDone?.();
+          break;
         }
 
         // 解码并追加到缓冲区
-        buffer += decoder.decode(value, { stream: true })
+        buffer += decoder.decode(value, { stream: true });
 
-        // 按行分割处理
-        const lines = buffer.split('\n')
-        // 最后一行可能不完整，保留在 buffer 中
-        buffer = lines.pop() || ''
+        // 按双换行分割完整的 SSE 消息
+        const messages = buffer.split("\n\n");
 
-        for (const line of lines) {
-          processLine(line.trim(), onMessage, onDone)
+        // 最后一个元素可能是不完整的，保留在缓冲区
+        buffer = messages.pop() || "";
+
+        // 处理完整的消息
+        for (const msg of messages) {
+          if (msg.trim()) {
+            const shouldStop = processSSEMessage(msg, onMessage);
+            if (shouldStop) {
+              onDone?.();
+              return;
+            }
+          }
         }
       }
     })
-    .catch((error) => {
-      // AbortError 由用户主动中断触发，静默处理，不触发 onError
-      if (error.name === 'AbortError') {
-        return
+    .catch((err) => {
+      if (err.name !== "AbortError") {
+        onError?.(err);
       }
-      onError && onError(error)
-    })
+    });
 
-  // 返回 stop 方法供外部调用
-  return {
-    stop() {
-      abortController.abort()
-    }
-  }
+  // 返回中断函数
+  return () => controller.abort();
 }
 
 /**
- * 处理单行 SSE 数据
- *
- * @param {string} line - 单行文本
- * @param {function} onMessage - 消息回调
- * @param {function} onDone - 完成回调
+ * 处理单条 SSE 消息
+ * @param {string} message - 完整的 SSE 消息（可能包含多行 data:）
+ * @param {Function} onMessage - 消息回调
+ * @returns {boolean} 是否应该停止（遇到 [DONE]）
  */
-function processLine(line, onMessage, onDone) {
-  // 跳过空行和非 data 行
-  if (!line || !line.startsWith('data:')) {
-    return
+function processSSEMessage(message, onMessage) {
+  // SSE 消息可能包含多行（data:, event:, id: 等），只处理 data: 行
+  const lines = message.split("\n");
+
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const data = line.slice(6); // 去掉 "data: " 前缀
+
+      if (data === "[DONE]") {
+        return true;
+      }
+
+      try {
+        const parsed = JSON.parse(data);
+        onMessage?.(parsed);
+      } catch {
+        // JSON 解析失败，可能是数据太大或被截断
+        // 尝试作为纯文本处理
+        console.warn("[SSE] JSON解析失败，数据长度:", data.length);
+        onMessage?.({ type: "text_chunk", content: data });
+      }
+    }
   }
 
-  // 提取 data: 后面的内容
-  const dataStr = line.slice(5).trim()
-
-  // 收到 [DONE] 标记，流结束
-  if (dataStr === '[DONE]') {
-    onDone && onDone()
-    return
-  }
-
-  // 空数据跳过
-  if (!dataStr) {
-    return
-  }
-
-  // 尝试解析 JSON
-  try {
-    const data = JSON.parse(dataStr)
-    onMessage && onMessage(data)
-  } catch (e) {
-    // JSON 解析失败，忽略该行
-    console.warn('SSE 数据解析失败:', dataStr)
-  }
+  return false;
 }
