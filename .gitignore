@@ -87,3 +87,7 @@ datasets/
 !datasets/rsod/yolo_dataset/data.yaml
 
 _temp_diff.txt
+
+# 本地解压的模型权重目录（源文件以 zip 形式提交）
+backend/models/
+

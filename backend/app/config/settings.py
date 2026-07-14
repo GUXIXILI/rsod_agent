@@ -69,9 +69,7 @@ class Settings(BaseSettings):
     DATASET_BASE_DIR: str = "datasets"    # 数据集根目录
 
     # Fire/smoke inference configuration
-    FIRE_SMOKE_MODEL_PATH: str = (
-        "runs/fire_smoke/yolo11n_e50_b16_s42/weights/best.pt"
-    )
+    FIRE_SMOKE_MODEL_PATH: str = "models/fire_smoke_yolo11n_v1/best.pt"
     FIRE_SMOKE_DEVICE: str = "0"
     FIRE_SMOKE_IMAGE_FIRE_THRESHOLD: float = 0.25
     FIRE_SMOKE_IMAGE_SMOKE_THRESHOLD: float = 0.20
