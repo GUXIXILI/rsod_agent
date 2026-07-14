@@ -7,6 +7,7 @@ from alembic import context
 
 # 将项目根目录加入 Python 路径，确保能导入 app 模块
 import sys
+import os
 from pathlib import Path
 # __file__ = alembic/env.py, __file__.parent = alembic/, __file__.parent.parent = backend/
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -20,6 +21,14 @@ from app.entity import db_models
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# ====== 关键修改 START ======
+# 从环境变量读取 DATABASE_URL，如果不存在则使用默认值
+# 这个值会覆盖 alembic.ini 中的 sqlalchemy.url
+database_url = os.environ.get('DATABASE_URL', 'postgresql://rsod_admin:rsod_admin@postgres:5432/rsod_agent')
+# 将 URL 设置到 Alembic 配置中
+config.set_main_option('sqlalchemy.url', database_url)
+# ====== 关键修改 END ======
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
