@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 from ultralytics import YOLO
+from app.entity.db_models import ModelVersion
 
 from collections.abc import Mapping, Sequence
 import math
@@ -198,3 +199,105 @@ def evaluate_model(
         encoding="utf-8",
     )
     return report
+
+def _validated_report_metrics(report: dict) -> dict:
+    """校验准备写入数据库的评估指标。"""
+    if not isinstance(report, Mapping):
+        raise ModelEvaluationError("Evaluation report must be a mapping")
+
+    metrics = report.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise ModelEvaluationError(
+            "Evaluation report does not contain metrics"
+        )
+
+    per_class_ap = metrics.get("per_class_ap")
+    if not isinstance(per_class_ap, Mapping):
+        raise ModelEvaluationError(
+            "Evaluation report does not contain per-class AP"
+        )
+
+    expected_names = tuple(EXPECTED_CLASS_MAPPING.values())
+    if set(per_class_ap) != set(expected_names):
+        raise ModelEvaluationError(
+            "Evaluation per-class AP does not match fire/smoke classes"
+        )
+
+    return {
+        "precision": _metric_value(
+            "precision", metrics.get("precision")
+        ),
+        "recall": _metric_value(
+            "recall", metrics.get("recall")
+        ),
+        "map50": _metric_value(
+            "map50", metrics.get("map50")
+        ),
+        "map50_95": _metric_value(
+            "map50_95", metrics.get("map50_95")
+        ),
+        "per_class_ap": {
+            class_name: _metric_value(
+                f"{class_name} AP",
+                per_class_ap[class_name],
+            )
+            for class_name in expected_names
+        },
+    }
+
+
+def save_evaluation_result(
+    db,
+    model_version_id: int,
+    report: dict,
+) -> ModelVersion:
+    """将模型评估结果安全写入ModelVersion记录。"""
+    model_version = (
+        db.query(ModelVersion)
+        .filter(ModelVersion.id == model_version_id)
+        .first()
+    )
+    if model_version is None:
+        raise ModelEvaluationError(
+            f"Model version not found: {model_version_id}"
+        )
+
+    reported_model = report.get("model")
+    if not reported_model:
+        raise ModelEvaluationError(
+            "Evaluation report does not contain model path"
+        )
+
+    stored_path = Path(
+        model_version.model_path
+    ).expanduser().resolve()
+    reported_path = Path(
+        str(reported_model)
+    ).expanduser().resolve()
+
+    if stored_path != reported_path:
+        raise ModelEvaluationError(
+            "Evaluated model path does not match model version"
+        )
+    if not stored_path.is_file():
+        raise ModelEvaluationError(
+            f"Stored model file does not exist: {stored_path}"
+        )
+
+    metrics = _validated_report_metrics(report)
+
+    model_version.precision = metrics["precision"]
+    model_version.recall = metrics["recall"]
+    model_version.map50 = metrics["map50"]
+    model_version.map50_95 = metrics["map50_95"]
+    model_version.per_class_ap = metrics["per_class_ap"]
+    model_version.file_size = stored_path.stat().st_size
+
+    try:
+        db.commit()
+        db.refresh(model_version)
+    except Exception:
+        db.rollback()
+        raise
+
+    return model_version
