@@ -1,6 +1,14 @@
 """火灾烟雾模型评估服务。"""
 
 from collections.abc import Mapping, Sequence
+import hashlib
+import json
+import math
+from pathlib import Path
+
+from ultralytics import YOLO
+
+from collections.abc import Mapping, Sequence
 import math
 
 
@@ -89,3 +97,104 @@ def build_evaluation_summary(metrics) -> dict:
         "map50_95": _metric_value("map50_95", box_metrics.map),
         "per_class_ap": per_class_ap,
     }
+
+def _sha256(file_path: Path) -> str:
+    """分块计算文件SHA256，避免一次性读取大型模型。"""
+    digest = hashlib.sha256()
+    with file_path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def evaluate_model(
+    model_path: str | Path,
+    data_path: str | Path,
+    output_dir: str | Path,
+    split: str = "val",
+    imgsz: int = 640,
+    batch: int = 16,
+    device: str = "cpu",
+) -> dict:
+    """运行YOLO验证，生成指标报告和混淆矩阵。"""
+    resolved_model = Path(model_path).expanduser().resolve()
+    resolved_data = Path(data_path).expanduser().resolve()
+    resolved_output = Path(output_dir).expanduser().resolve()
+
+    if not resolved_model.is_file():
+        raise ModelEvaluationError(
+            f"Model file does not exist: {resolved_model}"
+        )
+    if not resolved_data.is_file():
+        raise ModelEvaluationError(
+            f"Dataset configuration does not exist: {resolved_data}"
+        )
+    if split not in {"val", "test"}:
+        raise ModelEvaluationError("split must be val or test")
+    if imgsz < 320 or imgsz % 32 != 0:
+        raise ModelEvaluationError(
+            "imgsz must be at least 320 and divisible by 32"
+        )
+    if batch <= 0:
+        raise ModelEvaluationError("batch must be greater than zero")
+
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+
+    model = YOLO(str(resolved_model))
+    metrics = model.val(
+        data=str(resolved_data),
+        split=split,
+        imgsz=imgsz,
+        batch=batch,
+        device=device,
+        workers=0,
+        plots=True,
+        project=str(resolved_output.parent),
+        name=resolved_output.name,
+        exist_ok=False,
+        verbose=False,
+    )
+
+    summary = build_evaluation_summary(metrics)
+    save_dir = Path(
+        getattr(metrics, "save_dir", resolved_output)
+    ).resolve()
+
+    confusion_matrix = save_dir / "confusion_matrix.png"
+    normalized_confusion_matrix = (
+        save_dir / "confusion_matrix_normalized.png"
+    )
+
+    if not confusion_matrix.is_file():
+        raise ModelEvaluationError(
+            f"Confusion matrix was not generated: {confusion_matrix}"
+        )
+    if not normalized_confusion_matrix.is_file():
+        raise ModelEvaluationError(
+            "Normalized confusion matrix was not generated: "
+            f"{normalized_confusion_matrix}"
+        )
+
+    report = {
+        "model": str(resolved_model),
+        "model_sha256": _sha256(resolved_model),
+        "data": str(resolved_data),
+        "split": split,
+        "imgsz": imgsz,
+        "batch": batch,
+        "device": device,
+        "metrics": summary,
+        "artifacts": {
+            "output_directory": str(save_dir),
+            "confusion_matrix": str(confusion_matrix),
+            "confusion_matrix_normalized": str(
+                normalized_confusion_matrix
+            ),
+        },
+    }
+
+    (save_dir / "evaluation.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return report
