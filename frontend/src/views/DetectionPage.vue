@@ -90,7 +90,8 @@
 import { ref, computed, onMounted } from 'vue'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { detectSingle, detectBatch, detectVideo } from '@/api/detection'
+import { detectSingle, detectBatch } from '@/api/detection'
+//import { detectSingle, detectBatch, detectVideo } from '@/api/detection'
 import { getActiveScenes } from '@/api/training'
 
 const scenes = ref([])

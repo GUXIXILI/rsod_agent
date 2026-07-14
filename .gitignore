@@ -84,6 +84,8 @@ datasets/
 *.pth
 *.pkl
 *.bin
+*.zip
 !datasets/rsod/yolo_dataset/data.yaml
 
 _temp_diff.txt
+
