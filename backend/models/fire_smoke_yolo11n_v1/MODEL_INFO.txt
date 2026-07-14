@@ -1,0 +1,8 @@
+模型：YOLO11n
+路径：D:\111\fire_smoke_team\backend\runs\fire_smoke\yolo11n_e50_b16_s42\weights\best.pt
+大小：5,447,450 bytes，约5.2 MB
+SHA256：2343EE5BE5B73D025E353FF450ED697C950DF9403FF0AE65DAF6BC61ECCEF60D
+类别：fire=0，smoke=1
+图片阈值：fire=0.25，smoke=0.20
+视频阈值：fire=0.20，smoke=0.20，连续3帧确认
+测试集mAP50：0.757
