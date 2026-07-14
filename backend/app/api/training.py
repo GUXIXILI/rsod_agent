@@ -479,7 +479,7 @@ async def predict_with_model(
     annotated_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     return {
-        "task_id": task_id,
+        "task_id": task.id,
         "task_uuid": task.task_uuid,
         "total_objects": len(result.detections),
         "inference_time": round(result.inference_time_ms, 2),
