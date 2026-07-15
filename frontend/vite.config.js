@@ -3,9 +3,9 @@
  * - 配置前端开发服务器、路径别名、CSS 预处理器、API 代理
  * - 配置 Vitest 测试框架
  */
-import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
+import { defineConfig } from 'vite'
 
 export default defineConfig({
   plugins: [vue()],
@@ -40,6 +40,11 @@ export default defineConfig({
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
         // 该代理支持 SSE 流式请求（使用原生 fetch + ReadableStream，不走 Axios）
+      },
+      '/api/detection/camera': {
+        target: 'ws://127.0.0.1:8000',
+        ws: true,
+        changeOrigin: true,
       },
     },
   },

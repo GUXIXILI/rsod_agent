@@ -5,10 +5,10 @@
       <!-- Logo 区域 -->
       <div class="logo-area">
         <div class="logo-icon">
-          <span class="logo-text">RS</span>
+          <span class="logo-text">FS</span>
         </div>
-        <h2 class="logo-title">RSOD Agent Platform</h2>
-        <p class="logo-subtitle">欢迎回来，请登录您的账号</p>
+        <h2 class="logo-title">Fire & Smoke Detection Platform</h2>
+        <p class="logo-subtitle">火灾烟雾智能检测系统</p>
       </div>
 
       <!-- 登录表单 -->
@@ -62,6 +62,11 @@
           </el-button>
         </el-form-item>
       </el-form>
+
+      <!-- 忘记密码链接 -->
+      <div class="forgot-password-link">
+        <router-link to="/forgot-password" class="link-action">忘记密码？</router-link>
+      </div>
 
       <!-- 底部注册链接 -->
       <div class="bottom-link">
@@ -233,6 +238,22 @@ const handleLogin = async (event) => {
     .el-icon {
       margin-right: 6px;
       font-size: 16px;
+    }
+  }
+}
+
+// 忘记密码链接
+.forgot-password-link {
+  text-align: right;
+  margin-bottom: 8px;
+  font-size: 14px;
+
+  .link-action {
+    color: $primary-color;
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
     }
   }
 }

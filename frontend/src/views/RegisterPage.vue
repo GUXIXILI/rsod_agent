@@ -5,9 +5,9 @@
       <!-- Logo 区域 -->
       <div class="logo-area">
         <div class="logo-icon">
-          <span class="logo-text">RS</span>
+          <span class="logo-text">FS</span>
         </div>
-        <h2 class="logo-title">RSOD Agent Platform</h2>
+        <h2 class="logo-title">Fire & Smoke Detection Platform</h2>
         <p class="logo-subtitle">创建新账号，开启智能之旅</p>
       </div>
 

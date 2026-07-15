@@ -9,12 +9,12 @@ class TestHealthCheck:
     """健康检查测试类"""
 
     def test_root_path(self, client: TestClient):
-        """测试根路径返回正确信息"""
+        """测试根路径返回 SPA 前端页面（HTML）"""
         response = client.get("/")
         assert response.status_code == 200
-        data = response.json()
-        assert "message" in data
-        assert "version" in data
+        # 根路径返回 SPA 前端 HTML 页面（非 JSON）
+        content_type = response.headers.get("content-type", "")
+        assert "text/html" in content_type
 
     def test_basic_health(self, client: TestClient):
         """测试基础健康检查返回 healthy 状态"""
