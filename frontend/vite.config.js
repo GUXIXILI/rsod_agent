@@ -31,6 +31,10 @@ export default defineConfig({
   server: {
     port: 5173,
     open: false,
+    // 允许 Cloudflare 临时隧道等外部 hostname 访问（开发调试用）
+    allowedHosts: ['.trycloudflare.com', 'localhost'],
+    // 关闭 HMR WebSocket：Cloudflare 隧道不支持 WebSocket，HMR 连不上会导致页面卡死
+    hmr: false,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8000',

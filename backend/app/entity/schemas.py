@@ -9,6 +9,7 @@ Pydantic 请求/响应模型
 """
 from datetime import datetime
 from typing import Optional
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
@@ -469,3 +470,50 @@ class FireAlertResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ══════════════════════════════════════════════════════════════
+# 八、模型评估与导出（feature/model-evaluation-export-yubai）
+# ══════════════════════════════════════════════════════════════
+
+class ModelEvaluationRequest(BaseModel):
+    """模型评估请求。"""
+    split: Literal["val", "test"] = "val"
+    imgsz: int = Field(default=640, ge=320, le=1280, multiple_of=32)
+    batch: int = Field(default=16, ge=1, le=64)
+    device: str = Field(default="cpu", pattern=r"^(cpu|\d+)$")
+
+
+class ModelEvaluationMetricsResponse(BaseModel):
+    """模型评估指标响应。"""
+    precision: float
+    recall: float
+    map50: float
+    map50_95: float
+    per_class_ap: dict[str, float]
+
+
+class ModelEvaluationResponse(BaseModel):
+    """模型评估响应。"""
+    model_version_id: int
+    metrics: ModelEvaluationMetricsResponse
+    artifacts: dict[str, str]
+
+    model_config = {"protected_namespaces": ()}
+
+
+class ModelExportRequest(BaseModel):
+    """模型导出请求。"""
+    format: Literal["onnx", "torchscript"] = "onnx"
+    imgsz: int = Field(default=640, ge=320, le=1280, multiple_of=32)
+    device: str = Field(default="cpu", pattern=r"^(cpu|\d+)$")
+
+
+class ModelExportResponse(BaseModel):
+    """模型导出响应。"""
+    model_version_id: int
+    format: str
+    file_name: str
+    file_size: int
+
+    model_config = {"protected_namespaces": ()}

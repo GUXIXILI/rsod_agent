@@ -64,7 +64,12 @@
       >
         📁 批量/ZIP
       </el-button>
-      <el-button disabled>🎬 视频</el-button>
+      <el-button
+        @click="handleVideoDetect"
+        :disabled="agentStore.isLoading"
+      >
+        🎬 视频
+      </el-button>
       <el-button disabled>📹 摄像头</el-button>
     </div>
 
@@ -121,7 +126,7 @@
  *   - 快捷操作栏（单图/批量/视频/摄像头）
  *   - 中断当前对话
  */
-import { detectBatch, detectSingle, detectZip } from "@/api/detection";
+import { detectBatch, detectSingle, detectVideo, detectZip, getVideoStatus } from "@/api/detection";
 import DetectionResultCard from "@/components/DetectionResultCard.vue";
 import { useAgentStore } from "@/stores/agent";
 import { renderMarkdown } from "@/utils/markdown";
@@ -413,6 +418,107 @@ async function handleQuickDetect(type) {
     };
     input.click();
   }
+}
+
+/**
+ * 视频检测流程：
+ * 1. 用户点击 "🎬 视频" 按钮
+ * 2. 弹出文件选择框（限制视频格式）
+ * 3. 选择视频后，上传到后端
+ * 4. 后端返回 task_id，前端开始轮询进度
+ * 5. 处理完成后，展示关键帧结果卡片
+ */
+async function handleVideoDetect() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "video/mp4,video/avi,video/quicktime,video/x-msvideo";
+  input.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const maxSize = 50 * 1024 * 1024;
+    if (file.size > maxSize) {
+      ElMessage.warning("视频文件不能超过 50MB");
+      return;
+    }
+
+    const videoUrl = URL.createObjectURL(file);
+
+    agentStore.addMessage({
+      role: "user",
+      content: `[视频检测] ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)}MB)`,
+      videoUrl,
+    });
+
+    agentStore.addMessage({
+      role: "assistant",
+      content: "正在上传视频...",
+      loading: true,
+    });
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const uploadResult = await detectVideo(formData);
+      const taskId = uploadResult.task_id;
+
+      const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+      lastMsg.content = "视频已上传，正在处理中...";
+
+      await pollVideoProgress(taskId);
+    } catch (err) {
+      console.error("[视频检测失败]", err);
+      const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+      lastMsg.content = `视频检测失败：${err.message || err}`;
+      lastMsg.loading = false;
+      lastMsg.error = true;
+    }
+  };
+  input.click();
+}
+
+/**
+ * 轮询视频检测进度
+ * @param {number} taskId - 视频检测任务 ID
+ */
+async function pollVideoProgress(taskId) {
+  const pollInterval = 3000;
+
+  return new Promise((resolve) => {
+    const poll = async () => {
+      try {
+        const result = await getVideoStatus(taskId);
+
+        if (result.status === "completed") {
+          const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+          lastMsg.content = `视频检测完成！发现 ${result.total_objects || 0} 个目标。`;
+          lastMsg.loading = false;
+          lastMsg.detectionResult = result;
+          resolve(result);
+        } else if (result.status === "failed") {
+          const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+          lastMsg.content = `视频检测失败：${result.error_message || "未知错误"}`;
+          lastMsg.loading = false;
+          lastMsg.error = true;
+          resolve(null);
+        } else {
+          const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+          lastMsg.content = `视频检测中... ${result.progress || 0}%`;
+          setTimeout(poll, pollInterval);
+        }
+      } catch (err) {
+        console.error("[轮询视频进度失败]", err);
+        const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+        lastMsg.content = `视频检测失败：${err.message || err}`;
+        lastMsg.loading = false;
+        lastMsg.error = true;
+        resolve(null);
+      }
+    };
+
+    setTimeout(poll, pollInterval);
+  });
 }
 
 onMounted(() => {

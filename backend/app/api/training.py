@@ -37,6 +37,27 @@ from app.entity.schemas import (
 from app.services.fire_smoke_detection_service import FireSmokeDetectionService
 from app.training.training_service import training_service
 
+# ── 模型评估与导出新增导入（feature/model-evaluation-export-yubai）──
+from typing import Literal
+from uuid import uuid4
+from fastapi import Query
+from app.entity.db_models import ModelVersion
+from app.entity.schemas import (
+    ModelEvaluationRequest,
+    ModelEvaluationResponse,
+    ModelExportRequest,
+    ModelExportResponse,
+)
+from app.services.model_artifact_service import (
+    ModelArtifactError,
+    export_model_version,
+    get_model_artifact,
+)
+from app.services.model_evaluation_service import (
+    ModelEvaluationError,
+    evaluate_and_save_model,
+)
+
 router = APIRouter(prefix="/api/training", tags=["training"])
 
 logger = get_logger(__name__)
@@ -493,3 +514,164 @@ async def predict_with_model(
             for det in result.detections
         ],
     }
+
+
+# ── 模型评估与导出路由（feature/model-evaluation-export-yubai）──
+
+def _get_owned_model_version(
+    db: Session,
+    model_version_id: int,
+    current_user,
+    forbidden_detail: str = "无权操作此模型版本",
+) -> ModelVersion:
+    """查找模型版本并校验当前用户是否有操作权限。"""
+    model_version = (
+        db.query(ModelVersion)
+        .filter(ModelVersion.id == model_version_id)
+        .first()
+    )
+    if model_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="模型版本不存在",
+        )
+
+    owns_training_task = (
+        model_version.training_task is not None
+        and model_version.training_task.user_id == current_user.id
+    )
+    owns_scene = (
+        model_version.scene is not None
+        and model_version.scene.created_by == current_user.id
+    )
+    if not getattr(current_user, "is_superuser", False) and not (
+        owns_training_task or owns_scene
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=forbidden_detail,
+        )
+    return model_version
+
+
+@router.post(
+    "/models/{model_version_id}/evaluate",
+    response_model=ModelEvaluationResponse,
+)
+def evaluate_model_version(
+    model_version_id: int,
+    request: ModelEvaluationRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """运行模型评估并将指标写入模型版本记录。"""
+    model_version = _get_owned_model_version(
+        db,
+        model_version_id,
+        current_user,
+        forbidden_detail="无权评估此模型版本",
+    )
+
+    data_path = (
+        Path(settings.DATASET_BASE_DIR)
+        / model_version.scene.name
+        / "yolo_dataset"
+        / "data.yaml"
+    )
+    output_dir = (
+        Path(settings.TRAIN_OUTPUT_DIR)
+        / "evaluations"
+        / str(model_version.id)
+        / uuid4().hex
+    )
+
+    try:
+        updated, report = evaluate_and_save_model(
+            db,
+            model_version_id=model_version.id,
+            data_path=data_path,
+            output_dir=output_dir,
+            split=request.split,
+            imgsz=request.imgsz,
+            batch=request.batch,
+            device=request.device,
+        )
+    except ModelEvaluationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "model_version_id": updated.id,
+        "metrics": report["metrics"],
+        "artifacts": report["artifacts"],
+    }
+
+
+@router.post(
+    "/models/{model_version_id}/export",
+    response_model=ModelExportResponse,
+)
+def export_model_artifact(
+    model_version_id: int,
+    request: ModelExportRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """导出模型为ONNX或TorchScript格式。"""
+    model_version = _get_owned_model_version(
+        db, model_version_id, current_user
+    )
+    try:
+        artifact_path = export_model_version(
+            db,
+            model_version_id=model_version.id,
+            export_format=request.format,
+            imgsz=request.imgsz,
+            device=request.device,
+        )
+    except ModelArtifactError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "model_version_id": model_version.id,
+        "format": request.format,
+        "file_name": artifact_path.name,
+        "file_size": artifact_path.stat().st_size,
+    }
+
+
+@router.get("/models/{model_version_id}/download")
+def download_model_artifact(
+    model_version_id: int,
+    artifact_format: Literal["pt", "onnx", "torchscript"] = Query(
+        default="pt", alias="format"
+    ),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """下载数据库模型版本对应的受支持制品。"""
+    model_version = _get_owned_model_version(
+        db, model_version_id, current_user
+    )
+    try:
+        artifact_path = get_model_artifact(
+            db,
+            model_version_id=model_version.id,
+            artifact_format=artifact_format,
+        )
+    except ModelArtifactError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    return FileResponse(
+        path=artifact_path,
+        filename=artifact_path.name,
+        media_type="application/octet-stream",
+    )

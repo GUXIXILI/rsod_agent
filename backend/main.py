@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from app.config.settings import settings
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
@@ -116,14 +118,23 @@ app.include_router(roles_router)
 app.include_router(chat_router)
 
 
-@app.get("/")
-def root():
-    return {
-        "message": "欢迎使用 GLW 火灾烟雾智能检测系统",
-        "version": "2.0.0",
-        "docs": "/docs",
-        "redoc": "/redoc",
-    }
+# ── 托管前端静态文件（SPA 模式）────────────────────────
+import os
+FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+
+if os.path.isdir(FRONTEND_DIST):
+    # 挂载 /assets/ 目录（JS/CSS 等静态资源）
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+
+    # SPA 回退：所有非 API 路径返回 index.html，前端路由自行处理
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # 如果请求的是文件（有扩展名），尝试直接返回
+        file_path = os.path.join(FRONTEND_DIST, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        # 否则返回 index.html（SPA 路由）
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
 
 
 if __name__ == "__main__":
