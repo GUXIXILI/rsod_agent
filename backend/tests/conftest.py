@@ -3,6 +3,12 @@ pytest 全局配置和共享夹具
 - 使用 SQLite 内存数据库进行测试，不影响 PostgreSQL
 - 提供 TestClient、数据库会话、测试用户等夹具
 """
+import os
+
+# 测试环境变量（必须在 import app 模块之前设置，否则 Settings 单例会用空值初始化）
+os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-key-for-testing-only-32chars!!")
+os.environ.setdefault("DEBUG", "True")
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine

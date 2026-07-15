@@ -3,27 +3,44 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from io import BytesIO
 from typing import Annotated, Any, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from PIL import Image, UnidentifiedImageError
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from PIL import Image, ImageDraw, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
 from app.config.settings import settings
+from app.core.logger import get_logger
 from app.database.session import get_db
 from app.services.detection_service import detection_service
 from app.services.fire_smoke_detection_service import (
     ConfirmationState,
+    FireSmokeDetectionService,
     fire_smoke_detection_service,
     video_confirmation_registry,
 )
 from app.services.history_service import history_service
 
+logger = get_logger(__name__)
+
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_VIDEO_BYTES = 500 * 1024 * 1024
 router = APIRouter(prefix="/api/detection", tags=["detection"])
 
 
@@ -243,6 +260,11 @@ async def detect_single(
     """单图检测：上传一张图片，检测火焰和烟雾"""
     try:
         image_bytes = await file.read()
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="Uploaded image exceeds 20 MiB",
+            )
         task = await asyncio.to_thread(
             detection_service.detect_single,
             db=db,
@@ -263,6 +285,11 @@ async def detect_single(
                 "fire_object_count": task.fire_object_count,
                 "smoke_object_count": task.smoke_object_count,
                 "annotated_url": task.annotated_url,
+                "inference_time": task.total_inference_time or 0,
+                "class_counts": {
+                    "fire": task.fire_object_count or 0,
+                    "smoke": task.smoke_object_count or 0,
+                },
             },
         }
     except ValueError as e:
@@ -286,7 +313,15 @@ async def detect_batch(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="单次最多上传 20 张图片")
 
     try:
-        image_files = [await f.read() for f in files]
+        image_files = []
+        for f in files:
+            data = await f.read()
+            if len(data) > MAX_IMAGE_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File '{f.filename}' exceeds 20 MiB",
+                )
+            image_files.append(data)
         filenames = [f.filename or f"image_{i}.jpg" for i, f in enumerate(files)]
         tasks = await asyncio.to_thread(
             detection_service.detect_batch,
@@ -333,6 +368,11 @@ async def detect_video(
     """视频检测：上传视频文件，逐帧检测"""
     try:
         video_bytes = await file.read()
+        if len(video_bytes) > MAX_VIDEO_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="Uploaded video exceeds 500 MiB",
+            )
         task = await asyncio.to_thread(
             detection_service.detect_video,
             db=db,
@@ -358,6 +398,73 @@ async def detect_video(
         }
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"视频检测失败: {str(e)}")
+
+
+@router.post("/zip")
+async def detect_zip(
+    file: UploadFile = File(..., description="ZIP 压缩包，内含多张图片"),
+    scene_id: int = Form(..., description="场景 ID"),
+    conf_threshold: float = Form(0.25, description="置信度阈值"),
+    iou_threshold: float = Form(0.45, description="NMS 阈值"),
+    image_size: int = Form(640, description="推理图像尺寸"),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZIP 批量检测：上传 ZIP 压缩包，对其中每张图片执行火焰烟雾检测
+
+    支持的图片格式：jpg, jpeg, png, bmp, webp
+    """
+    # 校验文件类型
+    if file.content_type and "zip" not in file.content_type and not file.filename.endswith(".zip"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="仅支持 ZIP 格式的压缩包",
+        )
+
+    try:
+        zip_bytes = await file.read()
+        if not zip_bytes:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="上传的 ZIP 文件为空")
+        if len(zip_bytes) > settings.ZIP_MAX_SIZE_MB * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"ZIP 文件超过最大限制 ({settings.ZIP_MAX_SIZE_MB} MB)",
+            )
+
+        # 调用检测服务
+        tasks = await asyncio.to_thread(
+            detection_service.detect_zip,
+            db=db,
+            user_id=current_user.id,
+            scene_id=scene_id,
+            zip_bytes=zip_bytes,
+            filename=file.filename or "upload.zip",
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold,
+            image_size=image_size,
+        )
+        return {
+            "code": 200,
+            "message": "ZIP 批量检测完成",
+            "data": {
+                "total": len(tasks),
+                "tasks": [
+                    {
+                        "task_id": t.id,
+                        "file_name": t.file_name,
+                        "fire_level": t.fire_level,
+                        "fire_object_count": t.fire_object_count,
+                        "smoke_object_count": t.smoke_object_count,
+                        "status": t.status,
+                    }
+                    for t in tasks
+                ],
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"ZIP 检测失败: {str(e)}")
 
 
 @router.get("/tasks/{task_id}")
@@ -406,3 +513,25 @@ def get_fire_alerts(
             for a in alerts
         ],
     }
+
+
+@router.get("/video/progress/{task_id}")
+def get_video_progress(task_id: int, current_user=Depends(get_current_user)):
+    """查询视频检测进度"""
+    import redis, json
+    from app.config.settings import settings as app_settings
+    r = redis.Redis(host=app_settings.REDIS_HOST, port=app_settings.REDIS_PORT, db=app_settings.REDIS_DB, decode_responses=True)
+    try:
+        data = r.get(f"video:progress:{task_id}")
+        if data:
+            return {"code": 200, "data": json.loads(data)}
+        return {"code": 200, "data": {"progress": -1, "message": "任务未找到或已完成"}}
+    except Exception:
+        return {"code": 200, "data": {"progress": -1, "message": "Redis 不可用"}}
+
+
+# ══════════════════════════════════════════════════════════════
+# WebSocket 摄像头实时检测
+# 说明：未鉴权版本已删除，统一使用 app/api/camera.py 中带 JWT 鉴权的版本
+# （main.py 已注册 camera_router，路由 /api/detection/camera 由 camera.py 提供）
+# ══════════════════════════════════════════════════════════════

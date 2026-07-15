@@ -92,6 +92,17 @@ class ChangePassword(BaseModel):
     new_password: str = Field(..., min_length=6, max_length=100, description="新密码")
 
 
+class ForgotPasswordRequest(BaseModel):
+    """忘记密码请求"""
+    email: str = Field(..., description="用户邮箱")
+
+
+class ResetPasswordRequest(BaseModel):
+    """重置密码请求"""
+    token: str = Field(..., description="重置令牌")
+    new_password: str = Field(..., min_length=6, description="新密码")
+
+
 # --- 角色权限 ---
 class RoleResponse(BaseModel):
     """角色响应"""
@@ -180,7 +191,7 @@ class DetectionTaskResponse(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime] = None
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 class DetectionResultResponse(BaseModel):
@@ -237,6 +248,8 @@ class TrainingTaskCreate(BaseModel):
     lr0: float = Field(default=0.01, description="初始学习率")
     augment_config: Optional[dict] = Field(None, description="数据增强配置")
 
+    model_config = {"protected_namespaces": ()}
+
 
 class TrainingTaskResponse(BaseModel):
     """训练任务响应"""
@@ -259,7 +272,7 @@ class TrainingTaskResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 class TrainingMetricResponse(BaseModel):
@@ -288,7 +301,7 @@ class ModelVersionBrief(BaseModel):
     is_default: bool
     created_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 class ModelVersionResponse(BaseModel):
@@ -313,7 +326,7 @@ class ModelVersionResponse(BaseModel):
     is_default: bool
     created_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 class ModelVersionCreate(BaseModel):
@@ -323,6 +336,15 @@ class ModelVersionCreate(BaseModel):
     model_name: str = Field(..., description="模型名称")
     model_type: str = Field(default="yolov11n", description="模型类型")
     description: Optional[str] = None
+
+    model_config = {"protected_namespaces": ()}
+
+
+class ModelPredictResponse(BaseModel):
+    """模型预测响应"""
+    status: str
+    detections: list = []
+    message: str = ""
 
 
 # ══════════════════════════════════════════════════════════════
@@ -351,6 +373,7 @@ class ChatMessageRequest(BaseModel):
     """发送消息请求"""
     session_id: Optional[int] = Field(None, description="会话 ID（为空则自动创建新会话）")
     content: str = Field(..., min_length=1, max_length=5000, description="消息内容")
+    image_path: Optional[str] = Field(None, description="快捷检测图片路径")
 
 
 class ChatMessageResponse(BaseModel):
@@ -447,6 +470,8 @@ class DetectionRequest(BaseModel):
     iou_threshold: float = Field(0.45, description="NMS 阈值")
     image_size: int = Field(640, description="推理图像尺寸")
 
+    model_config = {"protected_namespaces": ()}
+
 
 class FireLevelResult(BaseModel):
     """火情判定结果"""
@@ -517,3 +542,52 @@ class ModelExportResponse(BaseModel):
     file_size: int
 
     model_config = {"protected_namespaces": ()}
+
+
+# ══════════════════════════════════════════════════════════════
+# 九、管理员模块
+# ══════════════════════════════════════════════════════════════
+
+class UserStatusRequest(BaseModel):
+    """启用/禁用用户请求"""
+    is_active: bool = Field(..., description="是否启用用户")
+
+
+class ModelStatusRequest(BaseModel):
+    """切换模型状态请求"""
+    is_active: bool = Field(..., description="是否启用模型（True=active，False=archived）")
+
+
+class AdminUserItem(BaseModel):
+    """管理员用户列表项"""
+    id: int
+    username: str
+    email: str
+    phone: Optional[str] = None
+    avatar: Optional[str] = None
+    is_active: bool
+    is_superuser: bool
+    roles: list[str] = []
+    last_login_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AdminModelItem(BaseModel):
+    """管理员模型列表项"""
+    id: int
+    scene_id: int
+    scene_name: Optional[str] = None
+    training_task_id: Optional[int] = None
+    version: str
+    model_name: str
+    model_type: str
+    status: str
+    map50: Optional[float] = None
+    map50_95: Optional[float] = None
+    is_default: bool
+    file_size: Optional[int] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True, "protected_namespaces": ()}

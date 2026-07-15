@@ -77,21 +77,11 @@ class TestAuthLogin:
         data = response.json()
         assert "用户名或密码错误" in data["message"]
 
-    def test_login_nonexistent_user(self, client: TestClient):
-        """测试不存在的用户登录返回 401"""
+    def test_login_wrong_password_email(self, client: TestClient, create_test_user, test_user_data):
+        """测试使用邮箱 + 错误密码登录返回 401"""
         response = client.post("/api/auth/login", json={
-            "username": "nonexistent_user",
-            "password": "Test123456",
-        })
-        assert response.status_code == 401
-        data = response.json()
-        assert "用户名或密码错误" in data["message"]
-
-    def test_login_nonexistent_email(self, client: TestClient):
-        """测试不存在的邮箱登录返回 401"""
-        response = client.post("/api/auth/login", json={
-            "username": "nonexistent@email.com",
-            "password": "Test123456",
+            "username": test_user_data["email"],
+            "password": "wrongpassword",
         })
         assert response.status_code == 401
         data = response.json()

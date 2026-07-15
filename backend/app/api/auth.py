@@ -8,13 +8,14 @@
 - GET  /api/auth/me        获取当前用户信息
 """
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 from sqlalchemy.orm import Session
 from app.core.rate_limit import check_login_rate_limit, record_login_failure, clear_login_attempts
 from app.core.security import decode_access_token, create_access_token
 from app.core.token import create_refresh_token, validate_refresh_token, revoke_refresh_token, revoke_all_user_tokens
+from app.core.logger import get_logger
 from app.config.settings import settings
 from app.database.session import get_db
 from app.entity.schemas import (
@@ -24,8 +25,14 @@ from app.entity.schemas import (
     UserLogin,
     UserRegister,
     UserResponse,
+    UserUpdate,
+    ChangePassword,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
 )
 from app.services.user_service import user_service
+
+logger = get_logger(__name__)
 
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
@@ -198,3 +205,104 @@ async def get_current_user_info(
         "last_login_at": current_user.last_login_at,
         "created_at": current_user.created_at,
     }
+
+
+# ══════════════════════════════════════════════════════════════
+# 密码重置（公开端点，无需认证）
+# ══════════════════════════════════════════════════════════════
+
+@router.post("/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """
+    忘记密码 — 生成重置令牌
+    - 开发阶段直接返回 token，生产环境应改为发送邮件
+    """
+    token = user_service.create_reset_token(db, req.email)
+    return {"code": 200, "message": "重置令牌已生成", "data": {"token": token}}
+
+
+@router.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """
+    重置密码 — 使用令牌重置
+    - 令牌有效期 1 小时，使用后立即失效
+    """
+    success = user_service.reset_password(db, req.token, req.new_password)
+    if success:
+        return {"code": 200, "message": "密码重置成功"}
+    return {"code": 400, "message": "令牌无效或已过期"}
+
+
+# ══════════════════════════════════════════════════════════════
+# 用户信息修改（需要认证）
+# ══════════════════════════════════════════════════════════════
+
+ALLOWED_AVATAR_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2MB
+
+
+@router.put("/profile")
+async def update_profile(
+    req: UserUpdate,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """修改个人信息（邮箱、手机号）"""
+    user = user_service.update_profile(db, current_user.id, email=req.email, phone=req.phone)
+    return {
+        "code": 200,
+        "message": "个人信息已更新",
+        "data": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "phone": user.phone,
+            "avatar": user.avatar,
+        },
+    }
+
+
+@router.put("/password")
+async def change_password(
+    req: ChangePassword,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """修改密码（需验证旧密码）"""
+    success = user_service.change_password(db, current_user.id, req.old_password, req.new_password)
+    if not success:
+        return {"code": 400, "message": "旧密码错误"}
+    return {"code": 200, "message": "密码修改成功"}
+
+
+@router.post("/avatar")
+async def upload_avatar(
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    上传头像到 MinIO avatars bucket
+    - 文件大小 ≤ 2MB
+    - 支持格式：jpg/png/gif/webp
+    """
+    # 校验文件类型
+    if file.content_type not in ALLOWED_AVATAR_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"不支持的文件类型: {file.content_type}，仅支持 jpg/png/gif/webp",
+        )
+
+    # 读取文件并校验大小
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_AVATAR_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"文件大小超过限制（最大 2MB），当前 {len(file_bytes) / 1024 / 1024:.2f}MB",
+        )
+
+    url = user_service.upload_avatar(
+        db, current_user.id, file_bytes, file.filename, file.content_type
+    )
+    logger.info(f"头像上传成功: user_id={current_user.id}")
+    return {"code": 200, "message": "头像上传成功", "data": {"avatar_url": url}}

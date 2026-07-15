@@ -28,6 +28,12 @@ const routes = [
     component: () => import('@/views/RegisterPage.vue'),
     meta: { title: '注册', requiresAuth: false },
   },
+  {
+    path: '/forgot-password',
+    name: 'ForgotPassword',
+    component: () => import('@/views/ForgotPasswordPage.vue'),
+    meta: { title: '忘记密码', requiresAuth: false },
+  },
 
   // ---- 认证路由：需登录后访问，包裹在 MainLayout 中 ----
   {
@@ -72,6 +78,12 @@ const routes = [
         component: () => import('@/views/DashboardPage.vue'),
         meta: { title: '数据看板' },
       },
+      {
+        path: 'settings',
+        name: 'Settings',
+        component: () => import('@/views/SettingsPage.vue'),
+        meta: { title: '个人设置' },
+      },
     ],
   },
 
@@ -94,8 +106,8 @@ const router = createRouter({
 router.beforeEach((to, from, next) => {
   // 1. 设置页面标题
   document.title = to.meta.title
-    ? `${to.meta.title} - RSOD Agent Platform`
-    : 'RSOD Agent Platform'
+    ? `${to.meta.title} - Fire & Smoke Detection Platform`
+    : 'Fire & Smoke Detection Platform'
 
   // 2. 从 localStorage 直接读取 token，避免在守卫中导入 Pinia store 导致循环依赖
   const token = localStorage.getItem('token')
