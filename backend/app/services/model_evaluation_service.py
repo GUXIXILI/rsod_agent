@@ -7,13 +7,14 @@ import math
 from pathlib import Path
 
 from ultralytics import YOLO
+
 from app.entity.db_models import ModelVersion
-
-from collections.abc import Mapping, Sequence
-import math
-
-
-EXPECTED_CLASS_MAPPING = {0: "fire", 1: "smoke"}
+from app.services.fire_smoke_constants import EXPECTED_CLASSES
+from app.services.fire_smoke_validation import (
+    validate_batch_size,
+    validate_device,
+    validate_image_size,
+)
 
 
 class ModelEvaluationError(ValueError):
@@ -35,10 +36,10 @@ def _normalize_class_names(names) -> dict[int, str]:
     else:
         raise ModelEvaluationError("Invalid class mapping")
 
-    if normalized != EXPECTED_CLASS_MAPPING:
+    if normalized != EXPECTED_CLASSES:
         raise ModelEvaluationError(
             f"Unexpected class mapping: {normalized}; "
-            f"expected {EXPECTED_CLASS_MAPPING}"
+            f"expected {EXPECTED_CLASSES}"
         )
 
     return normalized
@@ -108,6 +109,20 @@ def _sha256(file_path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_evaluation_parameters(
+    imgsz: int,
+    batch: int,
+    device: str,
+) -> None:
+    """Apply the same evaluation constraints outside the API schema."""
+    try:
+        validate_image_size(imgsz)
+        validate_batch_size(batch)
+        validate_device(device)
+    except ValueError as exc:
+        raise ModelEvaluationError(str(exc)) from exc
+
+
 def evaluate_model(
     model_path: str | Path,
     data_path: str | Path,
@@ -118,6 +133,8 @@ def evaluate_model(
     device: str = "cpu",
 ) -> dict:
     """运行YOLO验证，生成指标报告和混淆矩阵。"""
+    validate_evaluation_parameters(imgsz, batch, device)
+
     resolved_model = Path(model_path).expanduser().resolve()
     resolved_data = Path(data_path).expanduser().resolve()
     resolved_output = Path(output_dir).expanduser().resolve()
@@ -132,12 +149,14 @@ def evaluate_model(
         )
     if split not in {"val", "test"}:
         raise ModelEvaluationError("split must be val or test")
-    if imgsz < 320 or imgsz % 32 != 0:
+    if resolved_output.is_file():
         raise ModelEvaluationError(
-            "imgsz must be at least 320 and divisible by 32"
+            f"Evaluation output must be a directory: {resolved_output}"
         )
-    if batch <= 0:
-        raise ModelEvaluationError("batch must be greater than zero")
+    if resolved_output.is_dir() and any(resolved_output.iterdir()):
+        raise ModelEvaluationError(
+            f"Evaluation output directory is not empty: {resolved_output}"
+        )
 
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -152,7 +171,7 @@ def evaluate_model(
         plots=True,
         project=str(resolved_output.parent),
         name=resolved_output.name,
-        exist_ok=False,
+        exist_ok=True,
         verbose=False,
     )
 
@@ -218,7 +237,7 @@ def _validated_report_metrics(report: dict) -> dict:
             "Evaluation report does not contain per-class AP"
         )
 
-    expected_names = tuple(EXPECTED_CLASS_MAPPING.values())
+    expected_names = tuple(EXPECTED_CLASSES.values())
     if set(per_class_ap) != set(expected_names):
         raise ModelEvaluationError(
             "Evaluation per-class AP does not match fire/smoke classes"

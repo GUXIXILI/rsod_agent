@@ -11,10 +11,10 @@ from typing import Any, Mapping, Sequence
 from PIL import Image
 
 from app.config.settings import settings
+from app.services.fire_smoke_constants import EXPECTED_CLASSES
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_CLASSES = {0: "fire", 1: "smoke"}
 
 
 @dataclass(frozen=True)

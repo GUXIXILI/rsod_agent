@@ -115,3 +115,8 @@ class TestAuditLogRequestBody:
 
         mock_db.rollback.assert_called_once()
         mock_db.close.assert_called_once()
+
+
+def test_audit_log_tests_use_real_save_method():
+    """API client isolation must not replace the method suite-wide."""
+    assert AuditLogMiddleware._save_log.__name__ == "_save_log"

@@ -1,11 +1,17 @@
 import pytest
 
+from app.config.settings import settings
 from app.entity.db_models import DetectionScene, ModelVersion
 from app.services.model_artifact_service import (
     ModelArtifactError,
     export_model_version,
     get_model_artifact,
 )
+
+
+@pytest.fixture(autouse=True)
+def allow_test_model_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "MODEL_ARTIFACT_ROOTS", str(tmp_path))
 
 
 def _create_model_version(db_session, tmp_path):
@@ -95,3 +101,31 @@ def test_get_model_artifact_rejects_missing_export(
 
     with pytest.raises(ModelArtifactError, match="does not exist"):
         get_model_artifact(db_session, version.id, "onnx")
+
+
+def test_export_model_version_rejects_invalid_device(
+    db_session, tmp_path
+):
+    version, _ = _create_model_version(db_session, tmp_path)
+
+    with pytest.raises(ModelArtifactError, match="device"):
+        export_model_version(
+            db_session,
+            version.id,
+            "onnx",
+            device="0,1",
+        )
+
+
+def test_get_model_artifact_rejects_path_outside_allowed_roots(
+    db_session, tmp_path, monkeypatch
+):
+    version, _ = _create_model_version(db_session, tmp_path)
+    monkeypatch.setattr(
+        settings,
+        "MODEL_ARTIFACT_ROOTS",
+        str(tmp_path / "allowed"),
+    )
+
+    with pytest.raises(ModelArtifactError, match="outside allowed"):
+        get_model_artifact(db_session, version.id, "pt")

@@ -4,7 +4,12 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
+from app.config.settings import settings
 from app.entity.db_models import ModelVersion
+from app.services.fire_smoke_validation import (
+    validate_device,
+    validate_image_size,
+)
 
 
 EXPORT_SUFFIXES = {
@@ -15,6 +20,7 @@ DOWNLOAD_SUFFIXES = {
     "pt": ".pt",
     **EXPORT_SUFFIXES,
 }
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ModelArtifactError(ValueError):
@@ -36,6 +42,23 @@ def _get_model_version(db, model_version_id: int) -> ModelVersion:
 
 def _stored_model_path(model_version: ModelVersion) -> Path:
     model_path = Path(model_version.model_path).expanduser().resolve()
+    configured_roots = [
+        value.strip()
+        for value in settings.MODEL_ARTIFACT_ROOTS.split(",")
+        if value.strip()
+    ]
+    allowed_roots = []
+    for value in configured_roots:
+        root = Path(value).expanduser()
+        allowed_roots.append(
+            (root if root.is_absolute() else BACKEND_ROOT / root).resolve()
+        )
+    if not allowed_roots or not any(
+        model_path.is_relative_to(root) for root in allowed_roots
+    ):
+        raise ModelArtifactError(
+            "Stored model path is outside allowed model directories"
+        )
     if not model_path.is_file():
         raise ModelArtifactError(
             f"Stored model file does not exist: {model_path}"
@@ -55,10 +78,11 @@ def export_model_version(
         raise ModelArtifactError(
             f"Unsupported export format: {export_format}"
         )
-    if imgsz < 320 or imgsz > 1280 or imgsz % 32 != 0:
-        raise ModelArtifactError(
-            "imgsz must be between 320 and 1280 and divisible by 32"
-        )
+    try:
+        validate_image_size(imgsz)
+        validate_device(device)
+    except ValueError as exc:
+        raise ModelArtifactError(str(exc)) from exc
 
     model_version = _get_model_version(db, model_version_id)
     model_path = _stored_model_path(model_version)

@@ -1,11 +1,18 @@
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api import training as training_api
 from app.api.auth import get_current_user
+from app.config.settings import settings
 from app.entity.db_models import DetectionScene, ModelVersion
 from main import app
+
+
+@pytest.fixture(autouse=True)
+def allow_test_model_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "MODEL_ARTIFACT_ROOTS", str(tmp_path))
 
 
 def _create_model_version(db_session, tmp_path, user_id):

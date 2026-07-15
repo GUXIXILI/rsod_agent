@@ -63,7 +63,7 @@ def db_session():
 
 
 @pytest.fixture
-def client(db_session):
+def client(db_session, monkeypatch):
     """
     提供 FastAPI TestClient
     使用 SQLite 测试数据库替代 PostgreSQL
@@ -80,15 +80,20 @@ def client(db_session):
         finally:
             pass
 
-    original_jwt_secret = settings.JWT_SECRET_KEY
-    original_init_minio = main_module.init_minio
-    original_save_log = AuditLogMiddleware._save_log
-    settings.JWT_SECRET_KEY = (
+    monkeypatch.setattr(
+        settings,
+        "JWT_SECRET_KEY",
         "test-only-jwt-secret-key-"
-        "0123456789abcdef0123456789abcdef"
+        "0123456789abcdef0123456789abcdef",
     )
-    main_module.init_minio = lambda: None
-    AuditLogMiddleware._save_log = lambda self, **kwargs: None
+    monkeypatch.setattr(main_module, "init_minio", lambda: None)
+    # API tests isolate persistence here; test_audit_log.py exercises the real
+    # method directly without requesting this fixture.
+    monkeypatch.setattr(
+        AuditLogMiddleware,
+        "_save_log",
+        lambda self, **kwargs: None,
+    )
     app.dependency_overrides[get_db] = override_get_db
 
     try:
@@ -96,9 +101,6 @@ def client(db_session):
             yield test_client
     finally:
         app.dependency_overrides.clear()
-        settings.JWT_SECRET_KEY = original_jwt_secret
-        main_module.init_minio = original_init_minio
-        AuditLogMiddleware._save_log = original_save_log
 
 
 @pytest.fixture
