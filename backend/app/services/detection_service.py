@@ -595,7 +595,7 @@ class DetectionService:
 
     def _load_model(self, db: Optional[Session], scene_id: int):
         """加载场景默认模型（带 LRU 缓存，最大 MAX_CACHE_SIZE 个）
-        
+
         当 db=None 时（如 detect_frame 纯推理场景），仅从缓存加载或使用默认模型。
         """
         with self._lock:
