@@ -25,6 +25,14 @@
         <span>检测工作台</span>
       </el-menu-item>
 
+      <!-- 摄像头检测 -->
+      <el-menu-item index="/camera-detection">
+        <el-icon>
+          <VideoCamera />
+        </el-icon>
+        <span>摄像头检测</span>
+      </el-menu-item>
+
       <!-- 模型训练 -->
       <el-menu-item index="/training">
         <el-icon>
@@ -58,6 +66,7 @@ import { useRoute } from 'vue-router'
 import {
   ChatDotRound,
   Picture,
+  VideoCamera,
   Cpu,
   Clock,
   DataAnalysis

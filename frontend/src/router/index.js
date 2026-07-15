@@ -49,6 +49,12 @@ const routes = [
         meta: { title: '检测工作台' },
       },
       {
+        path: 'camera-detection',
+        name: 'CameraDetection',
+        component: () => import('@/views/CameraDetectionPage.vue'),
+        meta: { title: '摄像头检测', requiresAuth: true },
+      },
+      {
         path: 'training',
         name: 'Training',
         component: () => import('@/views/TrainingPage.vue'),
