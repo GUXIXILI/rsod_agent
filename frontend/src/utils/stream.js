@@ -29,7 +29,9 @@ export function streamChat(url, body, callbacks) {
   const { onMessage, onDone, onError } = callbacks;
 
   // 从 localStorage 获取 Token
-  const token = localStorage.getItem("rsod_token");
+  // `token` is written by the shared request client. Keep the old key as a
+  // compatibility fallback for clients created before the key was unified.
+  const token = localStorage.getItem("token") || localStorage.getItem("rsod_token");
 
   // 使用 fetch + ReadableStream 实现 SSE
   const controller = new AbortController();
@@ -106,6 +108,9 @@ function processSSEMessage(message, onMessage) {
   // SSE 消息可能包含多行（data:, event:, id: 等），只处理 data: 行
   const lines = message.split("\n");
 
+  const eventLine = lines.find((line) => line.startsWith("event: "));
+  const eventType = eventLine ? eventLine.slice(7) : undefined;
+
   for (const line of lines) {
     if (line.startsWith("data: ")) {
       const data = line.slice(6); // 去掉 "data: " 前缀
@@ -116,6 +121,9 @@ function processSSEMessage(message, onMessage) {
 
       try {
         const parsed = JSON.parse(data);
+        if (eventType && !parsed.type) {
+          parsed.type = eventType;
+        }
         onMessage?.(parsed);
       } catch {
         // JSON 解析失败，可能是数据太大或被截断

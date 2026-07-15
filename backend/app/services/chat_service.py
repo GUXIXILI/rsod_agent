@@ -12,6 +12,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.entity.db_models import ChatSession, ChatMessage
+from app.services.chat_attachment_service import chat_attachment_service
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -107,6 +108,16 @@ class ChatService:
                 "tool_result": m.tool_result,
                 "tokens_used": m.tokens_used,
                 "latency_ms": m.latency_ms,
+                "attachments": [
+                    {
+                        "attachment_id": attachment.attachment_uuid,
+                        "file_name": attachment.file_name,
+                        "content_type": attachment.content_type,
+                        "file_size": attachment.file_size,
+                        "created_at": attachment.created_at,
+                    }
+                    for attachment in m.attachments
+                ],
                 "created_at": m.created_at,
             }
             for m in messages
@@ -118,6 +129,7 @@ class ChatService:
         session_id: int,
         user_id: int,
         content: str,
+        attachment_ids: list[str] | None = None,
     ) -> dict:
         """
         发送消息并存储（LLM 调用做成可插拔接口，初期返回固定回复）
@@ -134,6 +146,13 @@ class ChatService:
         )
         db.add(user_msg)
         db.flush()
+        chat_attachment_service.bind_to_message(
+            db=db,
+            user_id=user_id,
+            session_id=session_id,
+            message_id=user_msg.id,
+            attachment_ids=attachment_ids,
+        )
 
         # 加载会话历史作为 LLM 上下文
         history_messages = (
@@ -272,6 +291,14 @@ class ChatService:
                 agent_used="user",
             )
             db.add(user_msg)
+            db.flush()
+            chat_attachment_service.bind_to_message(
+                db=db,
+                user_id=user_id,
+                session_id=session.id,
+                message_id=user_msg.id,
+                attachment_ids=data.attachment_ids,
+            )
             db.commit()
             db.refresh(user_msg)
             user_msg_id = user_msg.id

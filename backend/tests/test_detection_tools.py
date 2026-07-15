@@ -1,7 +1,6 @@
 """LangChain 检测 Tool 定义与安全边界测试。"""
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -23,7 +22,6 @@ def test_builds_four_tools_without_exposing_runtime_context(tmp_path):
     runtime = DetectionToolRuntime(
         user_id=7,
         db=MagicMock(),
-        allowed_file_roots=(tmp_path,),
     )
     tools = _tools(runtime)
 
@@ -42,14 +40,13 @@ def test_stub_mode_returns_explicit_simulated_result(tmp_path):
     runtime = DetectionToolRuntime(
         user_id=7,
         db=MagicMock(),
-        allowed_file_roots=(tmp_path,),
         service=service,
         stub_mode=True,
     )
 
     result = json.loads(
         _tools(runtime)["detect_single_image"].invoke(
-            {"file_path": "not-created.jpg", "scene_id": 3}
+            {"attachment_id": "attachment-1", "scene_id": 3}
         )
     )
 
@@ -64,17 +61,13 @@ def test_runtime_reads_current_stub_setting(tmp_path, monkeypatch):
     runtime = DetectionToolRuntime(
         user_id=7,
         db=MagicMock(),
-        allowed_file_roots=(tmp_path,),
+        attachment_resolver=lambda attachment_id: None,
     )
 
     assert runtime.stub_mode is False
 
 
 def test_real_single_tool_calls_business_service(tmp_path):
-    upload_root = tmp_path / "uploads"
-    upload_root.mkdir()
-    image_path = upload_root / "fire.jpg"
-    image_path.write_bytes(b"image-bytes")
     task = SimpleNamespace(
         id=11,
         status="completed",
@@ -89,14 +82,16 @@ def test_real_single_tool_calls_business_service(tmp_path):
     runtime = DetectionToolRuntime(
         user_id=7,
         db=MagicMock(),
-        allowed_file_roots=(upload_root,),
+        attachment_resolver=lambda attachment_id: SimpleNamespace(
+            file_name="fire.jpg", data=b"image-bytes"
+        ),
         service=service,
         stub_mode=False,
     )
 
     result = json.loads(
         _tools(runtime)["detect_single_image"].invoke(
-            {"file_path": str(image_path), "scene_id": 3}
+            {"attachment_id": "attachment-1", "scene_id": 3}
         )
     )
 
@@ -110,37 +105,35 @@ def test_real_single_tool_calls_business_service(tmp_path):
     assert kwargs["image_file"] == b"image-bytes"
 
 
-def test_real_tool_rejects_path_outside_allowed_roots(tmp_path):
-    upload_root = tmp_path / "uploads"
-    upload_root.mkdir()
-    outside_path = tmp_path / "secret.jpg"
-    outside_path.write_bytes(b"secret")
+def test_real_tool_rejects_an_invalid_attachment_type(tmp_path):
     runtime = DetectionToolRuntime(
         user_id=7,
         db=MagicMock(),
-        allowed_file_roots=(upload_root,),
+        attachment_resolver=lambda attachment_id: SimpleNamespace(
+            file_name="secret.txt", data=b"secret"
+        ),
         service=MagicMock(),
         stub_mode=False,
     )
 
-    with pytest.raises(ToolException, match="允许的上传目录"):
+    with pytest.raises(ToolException, match="type is not valid"):
         _tools(runtime)["detect_single_image"].invoke(
-            {"file_path": str(outside_path), "scene_id": 3}
+            {"attachment_id": "attachment-1", "scene_id": 3}
         )
 
 
 def test_zip_tool_reports_missing_backend_capability(tmp_path):
-    zip_path = tmp_path / "images.zip"
-    zip_path.write_bytes(b"PK")
     runtime = DetectionToolRuntime(
         user_id=7,
         db=MagicMock(),
-        allowed_file_roots=(tmp_path,),
+        attachment_resolver=lambda attachment_id: SimpleNamespace(
+            file_name="images.zip", data=b"PK"
+        ),
         service=object(),
         stub_mode=False,
     )
 
-    with pytest.raises(ToolException, match="尚未实现"):
+    with pytest.raises(ToolException, match="not implemented"):
         _tools(runtime)["detect_zip_images_file"].invoke(
-            {"file_path": str(zip_path), "scene_id": 3}
+            {"attachment_id": "attachment-1", "scene_id": 3}
         )

@@ -1,11 +1,11 @@
-"""将现有检测业务服务封装为 LangChain Tool。"""
+"""Expose persisted fire/smoke detection workflows as LangChain tools."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.tools import BaseTool, ToolException, tool
 from pydantic import BaseModel, Field
@@ -22,44 +22,40 @@ MAX_ZIP_BYTES = 200 * 1024 * 1024
 
 
 class SingleImageInput(BaseModel):
-    """单图检测工具参数。"""
+    """Arguments for a single-image detection request."""
 
-    file_path: str = Field(min_length=1, description="服务端已上传图片的绝对路径")
-    scene_id: int = Field(gt=0, description="检测场景 ID")
+    attachment_id: str = Field(min_length=1, description="Opaque ID returned by the chat attachment upload API")
+    scene_id: int = Field(gt=0, description="Detection scene ID")
     conf_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     image_size: int = Field(default=640, ge=320, le=1280)
 
 
 class BatchImagesInput(BaseModel):
-    """批量图片检测工具参数。"""
+    """Arguments for a batch image detection request."""
 
-    file_paths: list[str] = Field(
-        min_length=1,
-        max_length=20,
-        description="服务端已上传图片的绝对路径列表",
-    )
-    scene_id: int = Field(gt=0, description="检测场景 ID")
+    attachment_ids: list[str] = Field(min_length=1, max_length=20, description="Opaque IDs returned by the chat attachment upload API")
+    scene_id: int = Field(gt=0, description="Detection scene ID")
     conf_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     image_size: int = Field(default=640, ge=320, le=1280)
 
 
 class ZipImagesInput(BaseModel):
-    """ZIP 图片集检测工具参数。"""
+    """Arguments for a ZIP image detection request."""
 
-    file_path: str = Field(min_length=1, description="服务端已上传 ZIP 的绝对路径")
-    scene_id: int = Field(gt=0, description="检测场景 ID")
+    attachment_id: str = Field(min_length=1, description="Opaque ID returned by the chat attachment upload API")
+    scene_id: int = Field(gt=0, description="Detection scene ID")
     conf_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     image_size: int = Field(default=640, ge=320, le=1280)
 
 
 class VideoInput(BaseModel):
-    """视频检测工具参数。"""
+    """Arguments for a video detection request."""
 
-    file_path: str = Field(min_length=1, description="服务端已上传视频的绝对路径")
-    scene_id: int = Field(gt=0, description="检测场景 ID")
+    attachment_id: str = Field(min_length=1, description="Opaque ID returned by the chat attachment upload API")
+    scene_id: int = Field(gt=0, description="Detection scene ID")
     conf_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     image_size: int = Field(default=640, ge=320, le=1280)
@@ -68,90 +64,95 @@ class VideoInput(BaseModel):
 
 @dataclass(frozen=True)
 class DetectionToolRuntime:
-    """由应用注入的检测上下文，不向大模型暴露用户和数据库对象。"""
+    """Application-owned dependencies that never appear in an LLM tool schema."""
 
     user_id: int
     db: Any
-    allowed_file_roots: tuple[Path, ...]
+    attachment_resolver: Callable[[str], Any] | None = None
     service: Any = detection_service
     stub_mode: bool = field(default_factory=lambda: settings.LLM_STUB_MODE)
 
     def __post_init__(self) -> None:
         if self.user_id <= 0:
             raise ValueError("user_id must be positive")
-        if not self.allowed_file_roots:
-            raise ValueError("At least one allowed file root is required")
+        if not self.stub_mode and self.attachment_resolver is None:
+            raise ValueError("attachment_resolver is required when stub mode is disabled")
 
 
 def _json_payload(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def _stub_payload(mode: str, scene_id: int, files: list[str]) -> str:
+def _stub_payload(mode: str, scene_id: int, attachment_ids: list[str]) -> str:
     return _json_payload(
         {
             "mode": mode,
             "status": "simulated",
             "stub": True,
             "scene_id": scene_id,
-            "files": [Path(item).name for item in files],
-            "message": "LLM_STUB_MODE 已启用，未执行真实模型推理。",
+            "attachment_ids": attachment_ids,
+            "message": "LLM_STUB_MODE is enabled; model inference was not run.",
         }
     )
 
 
-def _resolve_file(
+def _resolve_attachment(
     runtime: DetectionToolRuntime,
-    file_path: str,
+    attachment_id: str,
     suffixes: set[str],
     max_bytes: int,
-) -> Path:
-    candidate = Path(file_path).expanduser().resolve()
-    roots = [Path(root).expanduser().resolve() for root in runtime.allowed_file_roots]
-    if not any(candidate == root or root in candidate.parents for root in roots):
-        raise ToolException("文件不在允许的上传目录中")
-    if not candidate.is_file():
-        raise ToolException("检测文件不存在")
-    if candidate.suffix.lower() not in suffixes:
-        raise ToolException(f"不支持的文件类型: {candidate.suffix or '无扩展名'}")
-    if candidate.stat().st_size > max_bytes:
-        raise ToolException("检测文件超过大小限制")
-    return candidate
+) -> Any:
+    try:
+        attachment = runtime.attachment_resolver(attachment_id) if runtime.attachment_resolver else None
+    except Exception as exc:
+        raise ToolException("Attachment could not be resolved") from exc
+    if attachment is None:
+        raise ToolException("Attachment could not be resolved")
+    file_name = getattr(attachment, "file_name", "")
+    data = getattr(attachment, "data", b"")
+    suffix = Path(file_name).suffix.lower()
+    if suffix not in suffixes:
+        raise ToolException("Attachment type is not valid for this detection tool")
+    if not isinstance(data, bytes) or not data:
+        raise ToolException("Attachment content is unavailable")
+    if len(data) > max_bytes:
+        raise ToolException("Attachment exceeds the allowed size")
+    return attachment
 
 
 def _task_payload(task: Any) -> dict[str, Any]:
     return {
-        "task_id": getattr(task, "id", None),
-        "status": getattr(task, "status", None),
-        "fire_level": getattr(task, "fire_level", None),
-        "fire_count": getattr(task, "fire_object_count", 0) or 0,
-        "smoke_count": getattr(task, "smoke_object_count", 0) or 0,
-        "annotated_url": getattr(task, "annotated_url", None),
-        "error_message": getattr(task, "error_message", None),
+        "task_id": task.id,
+        "status": task.status,
+        "fire_level": task.fire_level,
+        "fire_count": task.fire_object_count,
+        "smoke_count": task.smoke_object_count,
+        "annotated_url": task.annotated_url,
+        "error_message": task.error_message,
     }
 
 
 def build_detection_tools(runtime: DetectionToolRuntime) -> list[BaseTool]:
-    """创建绑定当前用户、数据库和允许目录的四个检测工具。"""
+    """Build four file-detection tools bound to one authenticated user and DB session."""
 
     @tool("detect_single_image", args_schema=SingleImageInput)
     def detect_single_image(
-        file_path: str,
+        attachment_id: str,
         scene_id: int,
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         image_size: int = 640,
     ) -> str:
-        """检测一张已上传图片，返回任务状态、火情等级、目标数量和标注图地址。"""
+        """Detect one uploaded image by its attachment ID."""
         if runtime.stub_mode:
-            return _stub_payload("single_image", scene_id, [file_path])
-        path = _resolve_file(runtime, file_path, IMAGE_SUFFIXES, MAX_IMAGE_BYTES)
+            return _stub_payload("single_image", scene_id, [attachment_id])
+        attachment = _resolve_attachment(runtime, attachment_id, IMAGE_SUFFIXES, MAX_IMAGE_BYTES)
         task = runtime.service.detect_single(
             db=runtime.db,
             user_id=runtime.user_id,
             scene_id=scene_id,
-            image_file=path.read_bytes(),
-            filename=path.name,
+            image_file=attachment.data,
+            filename=attachment.file_name,
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
             image_size=image_size,
@@ -160,54 +161,52 @@ def build_detection_tools(runtime: DetectionToolRuntime) -> list[BaseTool]:
 
     @tool("detect_batch_images", args_schema=BatchImagesInput)
     def detect_batch_images(
-        file_paths: list[str],
+        attachment_ids: list[str],
         scene_id: int,
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         image_size: int = 640,
     ) -> str:
-        """检测最多 20 张已上传图片，返回每张图片对应的检测任务摘要。"""
+        """Detect up to 20 uploaded images by their attachment IDs."""
         if runtime.stub_mode:
-            return _stub_payload("batch_images", scene_id, file_paths)
-        paths = [
-            _resolve_file(runtime, item, IMAGE_SUFFIXES, MAX_IMAGE_BYTES)
-            for item in file_paths
+            return _stub_payload("batch_images", scene_id, attachment_ids)
+        attachments = [
+            _resolve_attachment(runtime, attachment_id, IMAGE_SUFFIXES, MAX_IMAGE_BYTES)
+            for attachment_id in attachment_ids
         ]
         tasks = runtime.service.detect_batch(
             db=runtime.db,
             user_id=runtime.user_id,
             scene_id=scene_id,
-            image_files=[path.read_bytes() for path in paths],
-            filenames=[path.name for path in paths],
+            image_files=[attachment.data for attachment in attachments],
+            filenames=[attachment.file_name for attachment in attachments],
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
             image_size=image_size,
         )
-        return _json_payload(
-            {"status": "completed", "total": len(tasks), "tasks": [_task_payload(task) for task in tasks]}
-        )
+        return _json_payload({"status": "completed", "total": len(tasks), "tasks": [_task_payload(task) for task in tasks]})
 
     @tool("detect_zip_images_file", args_schema=ZipImagesInput)
     def detect_zip_images_file(
-        file_path: str,
+        attachment_id: str,
         scene_id: int,
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         image_size: int = 640,
     ) -> str:
-        """检测已上传 ZIP 内的图片；后端 detect_zip 未完成时返回明确错误。"""
+        """Detect images in one uploaded ZIP file by its attachment ID."""
         if runtime.stub_mode:
-            return _stub_payload("zip_images", scene_id, [file_path])
-        path = _resolve_file(runtime, file_path, {".zip"}, MAX_ZIP_BYTES)
+            return _stub_payload("zip_images", scene_id, [attachment_id])
+        attachment = _resolve_attachment(runtime, attachment_id, {".zip"}, MAX_ZIP_BYTES)
         detect_zip = getattr(runtime.service, "detect_zip", None)
         if detect_zip is None:
-            raise ToolException("ZIP 检测服务尚未实现")
+            raise ToolException("ZIP detection service is not implemented")
         result = detect_zip(
             db=runtime.db,
             user_id=runtime.user_id,
             scene_id=scene_id,
-            zip_bytes=path.read_bytes(),
-            filename=path.name,
+            zip_bytes=attachment.data,
+            filename=attachment.file_name,
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
             image_size=image_size,
@@ -218,23 +217,23 @@ def build_detection_tools(runtime: DetectionToolRuntime) -> list[BaseTool]:
 
     @tool("detect_video_file", args_schema=VideoInput)
     def detect_video_file(
-        file_path: str,
+        attachment_id: str,
         scene_id: int,
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         image_size: int = 640,
         frame_skip: int = 5,
     ) -> str:
-        """检测一个已上传视频，返回视频检测任务和火情摘要。"""
+        """Detect one uploaded video by its attachment ID."""
         if runtime.stub_mode:
-            return _stub_payload("video", scene_id, [file_path])
-        path = _resolve_file(runtime, file_path, VIDEO_SUFFIXES, MAX_VIDEO_BYTES)
+            return _stub_payload("video", scene_id, [attachment_id])
+        attachment = _resolve_attachment(runtime, attachment_id, VIDEO_SUFFIXES, MAX_VIDEO_BYTES)
         task = runtime.service.detect_video(
             db=runtime.db,
             user_id=runtime.user_id,
             scene_id=scene_id,
-            video_bytes=path.read_bytes(),
-            filename=path.name,
+            video_bytes=attachment.data,
+            filename=attachment.file_name,
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
             image_size=image_size,
@@ -242,12 +241,7 @@ def build_detection_tools(runtime: DetectionToolRuntime) -> list[BaseTool]:
         )
         return _json_payload(_task_payload(task))
 
-    return [
-        detect_single_image,
-        detect_batch_images,
-        detect_zip_images_file,
-        detect_video_file,
-    ]
+    return [detect_single_image, detect_batch_images, detect_zip_images_file, detect_video_file]
 
 
 __all__ = ["DetectionToolRuntime", "build_detection_tools"]

@@ -24,7 +24,7 @@ export const useAgentStore = defineStore('agent', {
      * 清空消息列表，生成新的会话 ID
      */
     newChat() {
-      this.currentSessionId = Date.now().toString()
+      this.currentSessionId = null
       this.messages = []
       this.isLoading = false
       // 若有正在进行的请求，先中断
@@ -40,6 +40,16 @@ export const useAgentStore = defineStore('agent', {
         message.timestamp = Date.now()
       }
       this.messages.push(message)
+    },
+
+    /** 更新最后一条助手消息的流式文本。 */
+    updateLastAssistantMessage(content) {
+      for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+        if (this.messages[index].role === 'assistant') {
+          this.messages[index].content = content
+          return
+        }
+      }
     },
 
     /**

@@ -78,6 +78,18 @@ class MinIOClient:
         )
         return url
 
+    def download_bytes(self, object_name: str) -> bytes:
+        """Read an object into memory and always release the HTTP connection."""
+        response = self.client.get_object(
+            bucket_name=self.bucket_name,
+            object_name=object_name,
+        )
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+
     def delete_file(self, object_name: str):
         """删除 MinIO 中的文件"""
         self.client.remove_object(
