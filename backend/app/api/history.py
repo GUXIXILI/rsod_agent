@@ -68,3 +68,23 @@ def delete_history_task(
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="检测任务不存在或无权删除")
     return {"code": 200, "message": "删除成功"}
+
+
+@router.get("/summary")
+def get_history_summary(
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取历史记录汇总统计"""
+    result = history_service.get_summary(db, current_user.id)
+    return {"code": 200, "message": "success", "data": result}
+
+
+@router.get("/scenes")
+def get_history_scenes(
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取用户使用过的检测场景列表"""
+    result = history_service.get_scenes(db, current_user.id)
+    return {"code": 200, "message": "success", "data": result}

@@ -1,197 +1,590 @@
 <template>
   <div class="detection-page">
-    <el-card class="upload-card">
-      <template #header>
-        <div class="card-header">
-          <span>火灾烟雾检测工作台</span>
-          <el-tag v-if="selectedScene" type="success" size="small">{{ selectedScene.display_name }}</el-tag>
+    <!-- ── 页面标题 ── -->
+    <div class="page-header">
+      <h2>检测工作台</h2>
+      <el-tag :type="statusTagType" size="large">
+        {{ statusText }}
+      </el-tag>
+    </div>
+
+    <!-- ── 主体区域 ── -->
+    <div class="main-content">
+      <!-- 左侧：图片上传 + 参数配置 -->
+      <div class="upload-panel">
+        <!-- 模式切换 -->
+        <div class="mode-switch">
+          <span class="control-label">检测模式：</span>
+          <el-radio-group v-model="detectMode" :disabled="isDetecting">
+            <el-radio-button label="single">单图检测</el-radio-button>
+            <el-radio-button label="batch">批量检测</el-radio-button>
+          </el-radio-group>
         </div>
-      </template>
-      <el-row :gutter="20">
-        <el-col :span="8">
-          <el-form label-width="100px" size="small">
-            <el-form-item label="检测场景">
-              <el-select v-model="sceneId" placeholder="选择场景" @change="onSceneChange">
-                <el-option v-for="s in scenes" :key="s.id" :label="s.display_name" :value="s.id" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="置信度阈值">
-              <el-slider v-model="confThreshold" :min="0.05" :max="0.95" :step="0.05" show-input />
-            </el-form-item>
-            <el-form-item label="IoU 阈值">
-              <el-slider v-model="iouThreshold" :min="0.1" :max="0.9" :step="0.05" show-input />
-            </el-form-item>
-            <el-form-item label="检测模式">
-              <el-radio-group v-model="detectMode">
-                <el-radio-button label="single">单图检测</el-radio-button>
-                <el-radio-button label="batch">批量检测</el-radio-button>
-                <el-radio-button label="video">视频检测</el-radio-button>
-              </el-radio-group>
-            </el-form-item>
-            <el-form-item>
-              <el-upload
-                ref="uploadRef"
-                :action="''"
-                :auto-upload="false"
-                :multiple="detectMode === 'batch'"
-                :accept="detectMode === 'video' ? 'video/*' : 'image/*'"
-                :on-change="handleFileChange"
-                :file-list="fileList"
-                :limit="detectMode === 'batch' ? 20 : 1"
-                list-type="picture"
-                drag
-              >
-                <el-icon><UploadFilled /></el-icon>
-                <div class="el-upload__text">
-                  拖拽{{ detectMode === 'video' ? '视频' : '图片' }}到此处或<em>点击上传</em>
-                </div>
-              </el-upload>
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" size="large" :loading="detecting" :disabled="!sceneId || fileList.length === 0" @click="startDetect" style="width: 100%">
-                {{ detecting ? '检测中...' : '开始检测' }}
-              </el-button>
-            </el-form-item>
-          </el-form>
-        </el-col>
-        <el-col :span="16">
-          <div v-if="detectResult" class="result-area">
-            <el-alert
-              :title="'火情等级：' + fireLevelLabel"
-              :type="fireLevelType"
-              :description="fireLevelDesc"
-              show-icon
-              :closable="false"
-              style="margin-bottom: 16px"
-            />
-            <el-image
-              v-if="detectResult.annotated_url"
-              :src="detectResult.annotated_url"
-              fit="contain"
-              style="max-height: 500px; width: 100%"
-            />
-            <el-descriptions v-if="detectResult" :column="2" border size="small" style="margin-top: 16px">
-              <el-descriptions-item label="火焰目标数">{{ detectResult.fire_object_count || 0 }}</el-descriptions-item>
-              <el-descriptions-item label="烟雾目标数">{{ detectResult.smoke_object_count || 0 }}</el-descriptions-item>
-              <el-descriptions-item label="火情等级">
-                <el-tag :type="fireLevelType">{{ fireLevelLabel }}</el-tag>
-              </el-descriptions-item>
-              <el-descriptions-item label="检测时间">{{ detectTime }}</el-descriptions-item>
-            </el-descriptions>
+
+        <!-- 图片上传区域 -->
+        <div class="upload-area">
+          <el-upload
+            ref="uploadRef"
+            :auto-upload="false"
+            :multiple="detectMode === 'batch'"
+            :limit="detectMode === 'batch' ? 20 : 1"
+            :accept="'.jpg,.jpeg,.png,.bmp,.webp'"
+            :file-list="fileList"
+            :on-change="handleFileChange"
+            :on-remove="handleFileRemove"
+            :on-exceed="handleExceed"
+            list-type="picture-card"
+            drag
+            action="#"
+          >
+            <el-icon class="upload-icon"><UploadFilled /></el-icon>
+            <div class="upload-text">
+              <span>将图片拖拽到此处，或</span>
+              <em>点击上传</em>
+            </div>
+            <template #tip>
+              <div class="upload-tip">
+                支持 jpg / jpeg / png / bmp / webp 格式，
+                {{ detectMode === 'batch' ? '最多 20 张' : '单张图片' }}
+              </div>
+            </template>
+          </el-upload>
+        </div>
+
+        <!-- 参数配置 -->
+        <el-card class="params-card" shadow="never">
+          <template #header>
+            <span>检测参数配置</span>
+          </template>
+
+          <div class="params-form">
+            <div class="param-item">
+              <span class="param-label">置信度阈值</span>
+              <el-slider
+                v-model="confThreshold"
+                :min="0.05"
+                :max="0.95"
+                :step="0.05"
+                :disabled="isDetecting"
+                show-input
+                style="flex: 1"
+              />
+            </div>
+
+            <div class="param-item">
+              <span class="param-label">IOU 阈值</span>
+              <el-slider
+                v-model="iouThreshold"
+                :min="0.1"
+                :max="0.9"
+                :step="0.05"
+                :disabled="isDetecting"
+                show-input
+                style="flex: 1"
+              />
+            </div>
+
+            <div class="param-item">
+              <span class="param-label">场景 ID</span>
+              <el-input-number
+                v-model="sceneId"
+                :min="1"
+                :disabled="isDetecting"
+                style="width: 120px"
+              />
+            </div>
           </div>
-          <el-empty v-else description="请上传图片或视频开始检测" />
-        </el-col>
-      </el-row>
-    </el-card>
+        </el-card>
+
+        <!-- 检测按钮 -->
+        <el-button
+          type="primary"
+          size="large"
+          :loading="isDetecting"
+          :disabled="fileList.length === 0"
+          @click="startDetection"
+          style="width: 100%; margin-top: 16px"
+        >
+          <el-icon><Search /></el-icon>
+          {{ isDetecting ? '检测中...' : '开始检测' }}
+        </el-button>
+      </div>
+
+      <!-- 右侧：检测结果 -->
+      <div class="result-panel">
+        <!-- 无结果占位 -->
+        <div v-if="results.length === 0 && !isDetecting" class="empty-state">
+          <el-icon :size="64" color="#ccc"><PictureFilled /></el-icon>
+          <p>上传图片并点击"开始检测"查看结果</p>
+        </div>
+
+        <!-- 检测中 -->
+        <div v-if="isDetecting" class="detecting-state">
+          <el-icon :size="32" class="is-loading"><Loading /></el-icon>
+          <p>正在检测中，请稍候...</p>
+        </div>
+
+        <!-- 结果列表 -->
+        <div v-if="results.length > 0" class="results-container">
+          <!-- 总览统计 -->
+          <el-card class="summary-card" shadow="never">
+            <template #header>
+              <span>检测概览</span>
+            </template>
+            <div class="summary-stats">
+              <div class="summary-item">
+                <div class="summary-value">{{ results.length }}</div>
+                <div class="summary-label">检测图片数</div>
+              </div>
+              <div class="summary-item">
+                <div class="summary-value danger">{{ totalFireCount }}</div>
+                <div class="summary-label">火焰目标数</div>
+              </div>
+              <div class="summary-item">
+                <div class="summary-value warning">{{ totalSmokeCount }}</div>
+                <div class="summary-label">烟雾目标数</div>
+              </div>
+              <div class="summary-item">
+                <div class="summary-value">{{ totalInferenceTime }}ms</div>
+                <div class="summary-label">总推理耗时</div>
+              </div>
+            </div>
+          </el-card>
+
+          <!-- 各图片结果 -->
+          <el-card
+            v-for="(result, index) in results"
+            :key="index"
+            class="result-card"
+            shadow="never"
+          >
+            <template #header>
+              <div class="result-card-header">
+                <span>图片 {{ index + 1 }}</span>
+                <el-tag size="small" type="success">
+                  火 {{ result.fire_object_count || 0 }} / 烟 {{ result.smoke_object_count || 0 }}
+                </el-tag>
+                <el-tag
+                  v-if="result.fire_level"
+                  size="small"
+                  :type="fireLevelType(result.fire_level)"
+                >
+                  {{ result.fire_level }}
+                </el-tag>
+              </div>
+            </template>
+            <div class="result-card-body">
+              <div class="result-info">
+                <div class="info-row">
+                  <span class="info-label">推理耗时</span>
+                  <span class="info-value">{{ result.inference_time || 0 }}ms</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">火焰目标</span>
+                  <span class="info-value danger">{{ result.fire_object_count || 0 }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">烟雾目标</span>
+                  <span class="info-value warning">{{ result.smoke_object_count || 0 }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">火灾等级</span>
+                  <span class="info-value">{{ result.fire_level || '无' }}</span>
+                </div>
+              </div>
+              <!-- 标注图（如果有） -->
+              <div v-if="result.annotated_url" class="result-annotated">
+                <img
+                  :src="result.annotated_url"
+                  alt="检测标注图"
+                  @click="previewAnnotated(result.annotated_url)"
+                />
+              </div>
+            </div>
+          </el-card>
+        </div>
+      </div>
+    </div>
+
+    <!-- 全屏图片预览 -->
+    <el-dialog v-model="showPreview" title="检测标注图" width="80%">
+      <img v-if="previewSrc" :src="previewSrc" style="width: 100%" alt="标注图" />
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { UploadFilled } from '@element-plus/icons-vue'
+/**
+ * DetectionPage.vue — 图片检测工作台
+ *
+ * 功能：
+ *   - 单图/批量图片上传检测
+ *   - 可调节置信度阈值、IOU 阈值
+ *   - 展示检测结果：火焰/烟雾目标数、火灾等级、推理耗时
+ *   - 标注图预览
+ */
+import { UploadFilled, Search, PictureFilled, Loading } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { detectSingle, detectBatch } from '@/api/detection'
-//import { detectSingle, detectBatch, detectVideo } from '@/api/detection'
-import { getActiveScenes } from '@/api/training'
+import { computed, ref } from 'vue'
+import { detectSingle } from '@/api/detection'
 
-const scenes = ref([])
-const sceneId = ref(null)
-const selectedScene = computed(() => scenes.value.find(s => s.id === sceneId.value))
+// ── 响应式状态 ──
+const uploadRef = ref(null)
+const fileList = ref([])
+const detectMode = ref('single')
+const isDetecting = ref(false)
+const results = ref([])
+
+// 检测配置
 const confThreshold = ref(0.25)
 const iouThreshold = ref(0.45)
-const detectMode = ref('single')
-const fileList = ref([])
-const detecting = ref(false)
-const detectResult = ref(null)
-const uploadRef = ref(null)
+const sceneId = ref(1)
 
-const fireLevelLabel = computed(() => {
-  const map = { safe: '安全', notice: '关注', warning: '警告', danger: '危险' }
-  return map[detectResult.value?.fire_level] || '未知'
-})
-const fireLevelType = computed(() => {
-  const map = { safe: 'success', notice: 'info', warning: 'warning', danger: 'danger' }
-  return map[detectResult.value?.fire_level] || 'info'
-})
-const fireLevelDesc = computed(() => {
-  const map = {
-    safe: '当前无火情，持续监控中',
-    notice: '检测到烟雾，请持续观察',
-    warning: '检测到火焰，请立即核实',
-    danger: '火势较大，请立即处置'
-  }
-  return map[detectResult.value?.fire_level] || ''
-})
-const detectTime = computed(() => new Date().toLocaleString())
+// 图片预览
+const showPreview = ref(false)
+const previewSrc = ref('')
 
-onMounted(async () => {
-  try {
-    const res = await getActiveScenes()
-    scenes.value = res.data || []
-  } catch (e) {
-    ElMessage.error('获取场景列表失败')
-  }
+// ── 计算属性 ──
+const statusText = computed(() => {
+  if (isDetecting.value) return '检测中...'
+  if (results.value.length > 0) return '检测完成'
+  return '待检测'
 })
 
-function onSceneChange() {}
+const statusTagType = computed(() => {
+  if (isDetecting.value) return 'warning'
+  if (results.value.length > 0) return 'success'
+  return 'info'
+})
 
-function handleFileChange(file, fileListNew) {
-  fileList.value = fileListNew
+const totalFireCount = computed(() => {
+  return results.value.reduce((sum, r) => sum + (r.fire_object_count || 0), 0)
+})
+
+const totalSmokeCount = computed(() => {
+  return results.value.reduce((sum, r) => sum + (r.smoke_object_count || 0), 0)
+})
+
+const totalInferenceTime = computed(() => {
+  return results.value.reduce((sum, r) => sum + (r.inference_time || 0), 0)
+})
+
+function fireLevelType(level) {
+  const map = { '低': 'info', '中': 'warning', '高': 'danger', '严重': 'danger' }
+  return map[level] || 'info'
 }
 
-async function startDetect() {
-  if (!sceneId.value || fileList.value.length === 0) {
-    ElMessage.warning('请选择场景并上传文件')
+// ── 文件处理 ──
+function handleFileChange(file) {
+  // el-upload 自动管理 fileList
+}
+
+function handleFileRemove(file) {
+  // el-upload 自动管理 fileList
+}
+
+function handleExceed() {
+  ElMessage.warning(`最多上传 ${detectMode.value === 'batch' ? 20 : 1} 张图片`)
+}
+
+// ── 开始检测 ──
+async function startDetection() {
+  if (fileList.value.length === 0) {
+    ElMessage.warning('请先上传图片')
     return
   }
-  detecting.value = true
-  detectResult.value = null
+
+  isDetecting.value = true
+  results.value = []
+
   try {
-    const formData = new FormData()
-    formData.append('scene_id', sceneId.value)
-    formData.append('conf_threshold', confThreshold.value)
-    formData.append('iou_threshold', iouThreshold.value)
-    formData.append('image_size', 640)
-
-    let res
     if (detectMode.value === 'single') {
-      formData.append('file', fileList.value[0].raw)
-      res = await detectSingle(formData)
-    } else if (detectMode.value === 'batch') {
-      fileList.value.forEach(f => formData.append('files', f.raw))
-      res = await detectBatch(formData)
-    } else {
-      formData.append('file', fileList.value[0].raw)
-      formData.append('frame_skip', 5)
-      res = await detectVideo(formData)
-    }
+      // 单图检测
+      const file = fileList.value[0].raw
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('scene_id', sceneId.value)
+      formData.append('conf_threshold', confThreshold.value)
+      formData.append('iou_threshold', iouThreshold.value)
 
-    if (res.data) {
-      detectResult.value = res.data
-      ElMessage.success('检测完成')
+      const res = await detectSingle(formData, sceneId.value)
+      if (res.code === 200) {
+        results.value = [res.data]
+        ElMessage.success('检测完成')
+      } else {
+        ElMessage.error(res.message || '检测失败')
+      }
+    } else {
+      // 批量检测：逐个调用单图接口
+      const allResults = []
+      for (let i = 0; i < fileList.value.length; i++) {
+        const file = fileList.value[i].raw
+        const formData = new FormData()
+        formData.append('file', file)
+        formData.append('scene_id', sceneId.value)
+        formData.append('conf_threshold', confThreshold.value)
+        formData.append('iou_threshold', iouThreshold.value)
+
+        try {
+          const res = await detectSingle(formData, sceneId.value)
+          if (res.code === 200) {
+            allResults.push(res.data)
+          }
+        } catch (e) {
+          console.error(`图片 ${i + 1} 检测失败:`, e)
+        }
+      }
+      results.value = allResults
+      ElMessage.success(`批量检测完成，成功 ${allResults.length} / ${fileList.value.length} 张`)
     }
-  } catch (e) {
-    ElMessage.error('检测失败: ' + (e.response?.data?.detail || e.message))
+  } catch (err) {
+    console.error('[检测失败]', err)
+    ElMessage.error('检测失败，请稍后重试')
   } finally {
-    detecting.value = false
+    isDetecting.value = false
   }
+}
+
+function previewAnnotated(url) {
+  previewSrc.value = url
+  showPreview.value = true
 }
 </script>
 
-<style scoped>
+<style lang="scss" scoped>
 .detection-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   padding: 20px;
+  background: #f5f5f5;
+  overflow: hidden;
 }
-.upload-card {
-  max-width: 1400px;
-  margin: 0 auto;
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+
+  h2 {
+    margin: 0;
+  }
 }
-.card-header {
+
+.main-content {
+  display: flex;
+  gap: 20px;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* 左侧上传区 */
+.upload-panel {
+  flex: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.mode-switch {
   display: flex;
   align-items: center;
   gap: 12px;
 }
-.result-area {
-  min-height: 400px;
+
+.control-label {
+  font-size: 14px;
+  color: #666;
+  white-space: nowrap;
+}
+
+.upload-area {
+  :deep(.el-upload) {
+    width: 100%;
+  }
+
+  :deep(.el-upload-dragger) {
+    width: 100%;
+    padding: 40px 20px;
+  }
+}
+
+.upload-icon {
+  font-size: 48px;
+  color: #c0c4cc;
+  margin-bottom: 10px;
+}
+
+.upload-text {
+  font-size: 14px;
+  color: #606266;
+
+  em {
+    color: #409eff;
+    font-style: normal;
+  }
+}
+
+.upload-tip {
+  font-size: 12px;
+  color: #999;
+  margin-top: 8px;
+}
+
+.params-card {
+  :deep(.el-card__body) {
+    padding: 16px;
+  }
+}
+
+.params-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.param-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.param-label {
+  font-size: 14px;
+  color: #666;
+  white-space: nowrap;
+  min-width: 90px;
+}
+
+/* 右侧结果区 */
+.result-panel {
+  flex: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #999;
+  font-size: 16px;
+  gap: 12px;
+}
+
+.detecting-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #409eff;
+  font-size: 16px;
+  gap: 12px;
+}
+
+.results-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.summary-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.summary-item {
+  text-align: center;
+  padding: 12px;
+  background: #f9f9f9;
+  border-radius: 8px;
+}
+
+.summary-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #409eff;
+
+  &.danger {
+    color: #f56c6c;
+  }
+
+  &.warning {
+    color: #e6a23c;
+  }
+}
+
+.summary-label {
+  font-size: 12px;
+  color: #999;
+  margin-top: 4px;
+}
+
+.result-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.result-card-body {
+  display: flex;
+  gap: 16px;
+}
+
+.result-info {
+  flex: 0 0 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.info-label {
+  color: #909399;
+}
+
+.info-value {
+  font-weight: 600;
+  color: #303133;
+
+  &.danger {
+    color: #f56c6c;
+  }
+
+  &.warning {
+    color: #e6a23c;
+  }
+}
+
+.result-annotated {
+  flex: 1;
+  min-width: 0;
+
+  img {
+    width: 100%;
+    max-height: 300px;
+    object-fit: contain;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid #e0e0e0;
+    transition: opacity 0.2s;
+
+    &:hover {
+      opacity: 0.8;
+    }
+  }
 }
 </style>

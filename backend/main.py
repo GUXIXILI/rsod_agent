@@ -9,10 +9,16 @@ from app.api.health import router as health_router
 from app.api.scenes import router as scenes_router
 from app.api.roles import router as roles_router
 from app.api.chat import router as chat_router
+from app.api.knowledge import router as knowledge_router
+from app.api.video_async import router as video_async_router
+from app.api.camera import router as camera_router
+from app.api.files import router as files_router
+from app.api.admin import router as admin_router
 from app.core.logger import setup_logging, get_logger
 from app.core.exceptions import register_exception_handlers
 from app.middleware.request_logger import RequestLogMiddleware
 from app.middleware.audit_log import AuditLogMiddleware
+from app.middleware.rate_limit import RateLimitMiddleware
 
 # ── 初始化日志系统 ────────────────────────────────────
 # 必须在创建 app 之前调用，确保后续所有模块的 logger 都已配置好
@@ -48,6 +54,42 @@ def init_minio():
             print("MinIO 初始化超时（已跳过，不影响启动）")
 
 
+def init_knowledge_index():
+    """
+    初始化知识库向量索引
+
+    在应用启动时自动加载 knowledge_base/ 目录下的知识文档，
+    构建向量索引并存储到 pgvector。
+    失败时打印警告但不影响应用启动。
+    """
+    import threading
+
+    result = {"success": False, "error": None}
+
+    def _init():
+        try:
+            from app.rag.retriever import SemanticRetriever
+            retriever = SemanticRetriever()
+            build_result = retriever.build_index()
+            if build_result.get("status") == "success":
+                result["success"] = True
+                print(f"知识库向量索引构建完成: {build_result.get('message', '')}")
+            else:
+                result["error"] = build_result.get("message", "未知错误")
+        except Exception as e:
+            result["error"] = str(e)
+
+    thread = threading.Thread(target=_init, daemon=True)
+    thread.start()
+    thread.join(timeout=30)  # 最多等待 30 秒
+
+    if not result["success"]:
+        if result["error"]:
+            print(f"知识库索引初始化失败（已跳过，不影响启动）: {result['error']}")
+        else:
+            print("知识库索引初始化超时（已跳过，不影响启动）")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
@@ -57,6 +99,7 @@ async def lifespan(_app: FastAPI):
     # 启动时执行
     print("正在初始化服务...")
     init_minio()
+    init_knowledge_index()
     # 启动定时任务调度器
     from app.scheduler import start_scheduler, stop_scheduler
 
@@ -102,6 +145,10 @@ app.add_middleware(RequestLogMiddleware)
 # 拦截写操作（POST/PUT/DELETE），异步记录到 operation_logs 表
 app.add_middleware(AuditLogMiddleware)
 
+# ── API 限流中间件 ───────────────────────────────────
+# 基于 Redis 滑动窗口的请求频率限制，Redis 不可用时自动降级放行
+app.add_middleware(RateLimitMiddleware)
+
 # ── 注册路由 ─────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(health_router)
@@ -113,9 +160,18 @@ app.include_router(detection_router)
 from app.api.history import router as history_router
 app.include_router(history_router)
 from app.api.stats import router as stats_router
-app.include_router(stats_router)
+app.include_router(stats_router, prefix="/api/stats")
+# 同时注册 /api/dashboard 前缀别名（与讲义要求一致）
+app.include_router(stats_router, prefix="/api/dashboard")
+from app.api.user import router as user_router
+app.include_router(user_router)
 app.include_router(roles_router)
 app.include_router(chat_router)
+app.include_router(knowledge_router)
+app.include_router(video_async_router)
+app.include_router(camera_router)
+app.include_router(files_router)
+app.include_router(admin_router)
 
 
 # ── 托管前端静态文件（SPA 模式）────────────────────────
@@ -129,12 +185,35 @@ if os.path.isdir(FRONTEND_DIST):
     # SPA 回退：所有非 API 路径返回 index.html，前端路由自行处理
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
+        # 路径遍历防护：解析真实路径并校验仍在 FRONTEND_DIST 内
+        # 防止 GET /../../etc/passwd 等攻击读取任意文件
+        requested_path = os.path.join(FRONTEND_DIST, full_path)
+        real_requested = os.path.realpath(requested_path)
+        real_dist = os.path.realpath(FRONTEND_DIST)
+        # 若解析后路径不在 FRONTEND_DIST 内，返回 404
+        if os.path.commonpath([real_requested, real_dist]) != real_dist:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
         # 如果请求的是文件（有扩展名），尝试直接返回
-        file_path = os.path.join(FRONTEND_DIST, full_path)
-        if full_path and os.path.isfile(file_path):
-            return FileResponse(file_path)
+        if full_path and os.path.isfile(real_requested):
+            return FileResponse(real_requested)
         # 否则返回 index.html（SPA 路由）
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+
+    # 根路径也返回前端页面（覆盖后面的 JSON 回退）
+    @app.get("/")
+    async def serve_root():
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+else:
+    # ── 无前端构建产物时的根路径回退 ────────────────────
+    @app.get("/")
+    def root():
+        return {
+            "message": "欢迎使用 GLW 火灾烟雾智能检测系统",
+            "version": "2.0.0",
+            "docs": "/docs",
+            "redoc": "/redoc",
+        }
 
 
 if __name__ == "__main__":

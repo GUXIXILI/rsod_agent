@@ -11,10 +11,13 @@ from typing import Any, Mapping, Sequence
 from PIL import Image
 
 from app.config.settings import settings
+from app.core.logger import get_logger
+from app.services.fire_smoke_constants import EXPECTED_CLASSES
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_CLASSES = {0: "fire", 1: "smoke"}
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,16 @@ class FireSmokeDetectionService:
         self.device = configured_device.strip() or None
         self._model = model
         self._lock = RLock()
-        if model is not None:
+        # 模型可用性标志：权重文件缺失时降级为 stub 模式，不阻塞服务启动
+        # 仅在未显式传入 model 实例时检查权重文件（测试场景常传入 mock model）
+        self.available: bool = True
+        if model is None and not self.model_path.is_file():
+            logger.warning(
+                "火灾烟雾模型权重文件不存在: %s，服务将以降级模式运行（检测返回空结果）",
+                self.model_path,
+            )
+            self.available = False
+        elif model is not None:
             self._validate_model_classes(model)
 
     def _get_model(self) -> Any:
@@ -108,6 +120,15 @@ class FireSmokeDetectionService:
         iou_threshold: float = 0.45,
         image_size: int = 640,
     ) -> InferenceResult:
+        # 降级模式：权重缺失时返回 stub 结果（空检测列表），不抛异常
+        if not self.available:
+            width, height = image.size
+            return InferenceResult(
+                detections=[],
+                image_width=int(width),
+                image_height=int(height),
+                inference_time_ms=0.0,
+            )
         normalized_thresholds = self._validate_thresholds(thresholds)
         model = self._get_model()
         predict_args: dict[str, Any] = {

@@ -12,7 +12,7 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.entity.db_models import DetectionTask, FireAlert
+from app.entity.db_models import DetectionTask, FireAlert, DetectionResult, DetectionScene
 
 
 class StatsService:
@@ -82,6 +82,43 @@ class StatsService:
             {"date": str(r.date), "count": r.count}
             for r in results
         ]
+
+    def get_class_distribution(self, db: Session, user_id: int, days: int = 30) -> list:
+        """获取类别分布统计"""
+        start_date = datetime.now() - timedelta(days=days)
+        results = (
+            db.query(DetectionResult.class_name, func.count(DetectionResult.id).label("count"))
+            .join(DetectionTask, DetectionResult.task_id == DetectionTask.id)
+            .filter(DetectionTask.user_id == user_id, DetectionTask.created_at >= start_date)
+            .group_by(DetectionResult.class_name)
+            .order_by(func.count(DetectionResult.id).desc())
+            .all()
+        )
+        return [{"class_name": r.class_name, "count": r.count} for r in results]
+
+    def get_scene_distribution(self, db: Session, user_id: int, days: int = 30) -> list:
+        """获取场景分布统计"""
+        start_date = datetime.now() - timedelta(days=days)
+        results = (
+            db.query(DetectionScene.name, func.count(DetectionTask.id).label("count"))
+            .join(DetectionTask, DetectionScene.id == DetectionTask.scene_id)
+            .filter(DetectionTask.user_id == user_id, DetectionTask.created_at >= start_date)
+            .group_by(DetectionScene.name)
+            .order_by(func.count(DetectionTask.id).desc())
+            .all()
+        )
+        return [{"scene_name": r.name, "count": r.count} for r in results]
+
+    def get_type_distribution(self, db: Session, user_id: int, days: int = 30) -> list:
+        """获取任务类型分布统计"""
+        start_date = datetime.now() - timedelta(days=days)
+        results = (
+            db.query(DetectionTask.task_type, func.count(DetectionTask.id).label("count"))
+            .filter(DetectionTask.user_id == user_id, DetectionTask.created_at >= start_date)
+            .group_by(DetectionTask.task_type)
+            .all()
+        )
+        return [{"task_type": r.task_type, "count": r.count} for r in results]
 
 
 # 单例

@@ -55,11 +55,17 @@ class MinIOClient:
         上传字节数据到 MinIO
         Args:
             object_name: MinIO 中的对象名称
-            data: 字节数据
+            data: 字节数据（支持 bytes 或 base64 字符串）
             content_type: MIME 类型
         Returns:
             预签名 URL
         """
+        if isinstance(data, str):
+            import base64
+            try:
+                data = base64.b64decode(data)
+            except Exception:
+                data = data.encode('utf-8')
         self.client.put_object(
             bucket_name=self.bucket_name,
             object_name=object_name,
@@ -89,6 +95,19 @@ class MinIOClient:
         finally:
             response.close()
             response.release_conn()
+
+    def get_file_stream(self, bucket_name: str, object_name: str):
+        """
+        获取 MinIO 文件的流式响应
+        Args:
+            bucket_name: 存储桶名称
+            object_name: 对象名称（文件路径）
+        Returns:
+            urllib3 响应对象，支持 stream() 方法
+        Raises:
+            S3Error: 文件不存在或访问异常
+        """
+        return self.client.get_object(bucket_name, object_name)
 
     def delete_file(self, object_name: str):
         """删除 MinIO 中的文件"""

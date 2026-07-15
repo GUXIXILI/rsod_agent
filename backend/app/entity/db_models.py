@@ -12,7 +12,7 @@
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, ForeignKey,
-    JSON, Text, Boolean, BigInteger
+    JSON, Text, Boolean, BigInteger, func
 )
 from sqlalchemy.orm import relationship
 from app.database.session import Base
@@ -146,6 +146,7 @@ class DetectionTask(Base):
     model_version_id = Column(Integer, ForeignKey("model_versions.id"), nullable=True, comment="使用的模型版本")
     task_type = Column(String(20), nullable=False, comment="检测类型：single/batch/folder/video/camera")
     status = Column(String(20), default="pending", comment="状态：pending/processing/completed/failed")
+    progress = Column(Integer, default=0, comment="处理进度 0-100")
 
     # 检测统计
     total_images = Column(Integer, default=0, comment="处理图像总数")
@@ -486,3 +487,21 @@ class FireAlert(Base):
     # 关联
     scene = relationship("DetectionScene", back_populates="fire_alerts")
     task = relationship("DetectionTask")
+
+
+# ══════════════════════════════════════════════════════════════
+# 八、密码重置令牌
+# ══════════════════════════════════════════════════════════════
+
+class PasswordResetToken(Base):
+    """密码重置令牌表 — 用于通过邮箱重置密码"""
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String(64), nullable=False, index=True, comment="SHA256哈希后的重置令牌")
+    expires_at = Column(DateTime(timezone=True), nullable=False, comment="过期时间")
+    used = Column(Boolean, default=False, comment="是否已使用")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", backref="password_reset_tokens")

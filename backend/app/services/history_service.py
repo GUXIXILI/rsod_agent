@@ -9,7 +9,7 @@ from typing import Optional
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.entity.db_models import DetectionResult, DetectionTask
+from app.entity.db_models import DetectionResult, DetectionTask, DetectionScene
 
 
 class HistoryService:
@@ -129,6 +129,31 @@ class HistoryService:
         db.delete(task)
         db.commit()
         return True
+
+    def get_summary(self, db: Session, user_id: int) -> dict:
+        """获取历史记录汇总"""
+        from sqlalchemy import func
+        total = db.query(func.count(DetectionTask.id)).filter(
+            DetectionTask.user_id == user_id
+        ).scalar() or 0
+        completed = db.query(func.count(DetectionTask.id)).filter(
+            DetectionTask.user_id == user_id, DetectionTask.status == "completed"
+        ).scalar() or 0
+        failed = db.query(func.count(DetectionTask.id)).filter(
+            DetectionTask.user_id == user_id, DetectionTask.status == "failed"
+        ).scalar() or 0
+        return {"total": total, "completed": completed, "failed": failed}
+
+    def get_scenes(self, db: Session, user_id: int) -> list:
+        """获取用户使用过的检测场景列表"""
+        results = (
+            db.query(DetectionScene.id, DetectionScene.name)
+            .join(DetectionTask, DetectionScene.id == DetectionTask.scene_id)
+            .filter(DetectionTask.user_id == user_id)
+            .distinct()
+            .all()
+        )
+        return [{"id": r.id, "name": r.name} for r in results]
 
 
 # 单例

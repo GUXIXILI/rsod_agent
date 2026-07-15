@@ -9,7 +9,7 @@
 - POST   /api/chat/messages                       — 发送消息
 - DELETE /api/chat/sessions/{session_id}           — 删除会话
 """
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -152,3 +152,25 @@ def delete_session(
     """删除会话（含消息级联删除）"""
     chat_service.delete_session(db, session_id, current_user.id)
     return {"code": 200, "message": "删除成功"}
+
+
+@router.post("/detect-shortcut")
+async def detect_shortcut(
+    image: UploadFile = File(...),
+    scene_id: int = Form(...),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """检测快捷 API — 直接调用检测服务，不经过 AI Agent"""
+    from app.services.detection_service import detection_service
+    image_bytes = await image.read()
+    task = detection_service.detect_single(
+        db=db, user_id=current_user.id, scene_id=scene_id,
+        image_file=image_bytes, filename=image.filename,
+    )
+    return {"code": 200, "message": "检测完成", "data": {
+        "task_id": task.id, "fire_level": task.fire_level,
+        "fire_object_count": task.fire_object_count,
+        "smoke_object_count": task.smoke_object_count,
+        "annotated_url": task.annotated_url,
+    }}

@@ -5,9 +5,9 @@
       :default-active="activeMenu"
       :router="true"
       class="app-sidebar__menu"
-      background-color="#304156"
+      background-color="#1A1A2E"
       text-color="#bfcbd9"
-      active-text-color="#409eff"
+      active-text-color="#FF6B35"
     >
       <!-- 智能对话 -->
       <el-menu-item index="/chat">
@@ -56,6 +56,14 @@
         </el-icon>
         <span>数据看板</span>
       </el-menu-item>
+
+      <!-- 个人设置 -->
+      <el-menu-item index="/settings">
+        <el-icon>
+          <Setting />
+        </el-icon>
+        <span>个人设置</span>
+      </el-menu-item>
     </el-menu>
   </aside>
 </template>
@@ -69,7 +77,8 @@ import {
   VideoCamera,
   Cpu,
   Clock,
-  DataAnalysis
+  DataAnalysis,
+  Setting
 } from '@element-plus/icons-vue'
 
 // 获取当前路由信息
@@ -101,12 +110,12 @@ const activeMenu = computed(() => route.path)
 
     /* 高亮菜单项背景色 */
     :deep(.el-menu-item.is-active) {
-      background-color: #263445 !important;
+      background-color: #16213E !important;
     }
 
     /* 菜单项悬停效果 */
     :deep(.el-menu-item:hover) {
-      background-color: #263445;
+      background-color: #16213E;
     }
   }
 }
