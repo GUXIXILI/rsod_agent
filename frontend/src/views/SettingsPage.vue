@@ -198,8 +198,8 @@ async function handleChangePassword() {
     ElMessage.success("密码修改成功，请重新登录");
     resetPasswordForm();
     // 清除登录状态，跳转到登录页
-    localStorage.removeItem("token");
-    localStorage.removeItem("refreshToken");
+    localStorage.removeItem("rsod_token");
+    localStorage.removeItem("rsod_refresh_token");
     localStorage.removeItem("user");
     setTimeout(() => {
       window.location.href = "/login";

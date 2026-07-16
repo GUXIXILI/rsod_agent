@@ -597,6 +597,12 @@ class DetectionService:
         """加载场景默认模型（带 LRU 缓存，最大 MAX_CACHE_SIZE 个）
         
         当 db=None 时（如 detect_frame 纯推理场景），仅从缓存加载或使用默认模型。
+        
+        模型路径解析优先级：
+        1. DB 中场景绑定的默认模型（db 不为 None 时）
+        2. settings.DEFAULT_MODEL_PATH（相对于后端根目录解析）
+        3. 后端根目录下的 yolo11n.pt（本地文件，不触发网络下载）
+        4. 最后才尝试 YOLO("yolov11n.pt")（会触发网络下载，仅作兜底）
         """
         with self._lock:
             if scene_id in self._model_cache:
@@ -605,6 +611,9 @@ class DetectionService:
                 return self._model_cache[scene_id]
 
         from ultralytics import YOLO
+
+        # 后端根目录绝对路径：detection_service.py → services/ → app/ → backend/
+        _BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 
         model_version = None
         if db is not None:
@@ -624,13 +633,32 @@ class DetectionService:
             if model_version and model_version.model_path and os.path.exists(model_version.model_path):
                 logger.info("使用场景绑定模型: scene_id=%s, path=%s", scene_id, model_version.model_path)
                 model = YOLO(model_version.model_path)
-            elif settings.DEFAULT_MODEL_PATH and os.path.exists(settings.DEFAULT_MODEL_PATH):
-                logger.info("使用 DEFAULT_MODEL_PATH: %s", settings.DEFAULT_MODEL_PATH)
-                model = YOLO(settings.DEFAULT_MODEL_PATH)
+            elif settings.DEFAULT_MODEL_PATH:
+                # 将 DEFAULT_MODEL_PATH 解析为绝对路径（相对于后端根目录）
+                model_path = Path(settings.DEFAULT_MODEL_PATH)
+                if not model_path.is_absolute():
+                    model_path = _BACKEND_ROOT / model_path
+                if model_path.exists():
+                    logger.info("使用 DEFAULT_MODEL_PATH: %s", model_path)
+                    model = YOLO(str(model_path))
+                else:
+                    # DEFAULT_MODEL_PATH 指定的文件不存在，尝试本地 yolo11n.pt
+                    fallback = _BACKEND_ROOT / "yolo11n.pt"
+                    if fallback.exists():
+                        logger.warning("DEFAULT_MODEL_PATH 不存在(%s)，使用本地: %s", model_path, fallback)
+                        model = YOLO(str(fallback))
+                    else:
+                        logger.warning("本地模型文件不存在，尝试下载 yolov11n.pt")
+                        model = YOLO("yolov11n.pt")
             else:
-                # 使用 yolov11n 作为默认模型
-                logger.info("使用 yolov11n.pt 作为 fallback 模型")
-                model = YOLO("yolov11n.pt")
+                # 无 DEFAULT_MODEL_PATH，优先使用本地 yolo11n.pt（绝对路径，不触发下载）
+                fallback = _BACKEND_ROOT / "yolo11n.pt"
+                if fallback.exists():
+                    logger.info("使用本地 yolo11n.pt: %s", fallback)
+                    model = YOLO(str(fallback))
+                else:
+                    logger.warning("本地模型文件不存在，尝试下载 yolov11n.pt")
+                    model = YOLO("yolov11n.pt")
 
             # LRU 淘汰：超出上限时移除最久未使用的模型
             if len(self._model_cache) >= self.MAX_CACHE_SIZE:

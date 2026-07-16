@@ -332,32 +332,22 @@ async function sendMessage() {
   // 滚动到底部
   scrollToBottom();
 
-  // ── 如果有附件图片，先上传到服务端获取真实路径 ──
-  let serverImagePath = null;
+  // ── 如果有附件图片，当前后端未提供 /chat/upload 接口，提示用户输入路径 ──
   if (fileToSend) {
-    try {
-      const formData = new FormData();
-      formData.append("file", fileToSend);
-      // 不设置 Content-Type，让 axios 自动添加 boundary
-      const uploadResult = await request.post("/chat/upload", formData);
-      serverImagePath = uploadResult.image_path;
-    } catch (err) {
-      console.error("[图片上传失败]", err.response?.data || err.message || err);
-      const lastMsg = agentStore.getLastAssistantMessage();
-      if (lastMsg) {
-        lastMsg.content = `图片上传失败：${err.response?.data?.detail || err.message || "未知错误"}，请重试`;
-        lastMsg.loading = false;
-        lastMsg.error = true;
-      }
-      agentStore.setLoading(false);
-      return;
+    const lastMsg = agentStore.getLastAssistantMessage();
+    if (lastMsg) {
+      lastMsg.content = `请直接输入图片路径或文件名（例如：检测一下 fire.jpg），当前不支持直接上传文件。`;
+      lastMsg.loading = false;
+      lastMsg.thinking = false;
     }
+    agentStore.setLoading(false);
+    return;
   }
 
   // 发起 SSE 流式请求
+  // 后端 /api/chat/messages/stream 要求字段名为 content
   const requestBody = {
-    message,
-    ...(serverImagePath ? { image_path: serverImagePath } : {}),
+    content: message,
   };
 
   let fullContent = "";

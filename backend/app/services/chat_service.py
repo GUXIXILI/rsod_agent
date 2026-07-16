@@ -7,6 +7,7 @@
 - LLM_STUB_MODE=false 时：使用真实的 LangChain ChatOpenAI + ReAct Agent
 """
 
+import asyncio
 import json
 import re
 import time
@@ -18,6 +19,7 @@ from fastapi import HTTPException
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
+from app.agent.detection_agent import detection_agent
 from app.entity.db_models import ChatSession, ChatMessage
 from app.config.settings import settings
 from app.core.logger import get_logger
@@ -330,80 +332,19 @@ class ChatService:
 
     def _run_agent_real(self, content: str, history: list = None) -> tuple:
         """
-        真实模式：使用 LangChain ChatOpenAI + ReAct Agent 执行对话。
+        真实模式：复用 DetectionAgent 单例执行对话。
 
-        需要配置有效的 LLM API 密钥（OPENAI_API_KEY 等环境变量）。
+        DetectionAgent 已在 detection_agent.py 中根据 settings 完成 LLM 配置，
+        这里直接调用其 chat() 方法，避免重复创建 LLM 和 AgentExecutor 实例。
         """
         start_time = time.time()
 
         try:
-            from langchain_openai import ChatOpenAI
-            from langchain.agents import create_react_agent, AgentExecutor
-            from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+            if not detection_agent.available:
+                raise RuntimeError("DetectionAgent 不可用，请检查 LLM 配置")
 
-            from app.agent.prompts import DETECTION_AGENT_SYSTEM_PROMPT
-            from app.agent.tools.detection_tool import (
-                detect_single_image,
-                detect_batch_images,
-                detect_zip_images_file,
-                detect_video_file,
-            )
-            from app.agent.tools.knowledge_tool import search_knowledge
-            from app.agent.tools.stats_tool import query_detection_stats, query_detection_history
-            from app.agent.tools.user_tool import query_user_list
-
-            # 绑定所有工具（8 个）
-            tools = [
-                detect_single_image,
-                detect_batch_images,
-                detect_zip_images_file,
-                detect_video_file,
-                search_knowledge,
-                query_detection_stats,
-                query_detection_history,
-                query_user_list,
-            ]
-
-            # 创建 LLM 实例
-            llm = ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=0.3,
-                max_tokens=2048,
-            )
-
-            # 构建 ReAct Prompt 模板
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", DETECTION_AGENT_SYSTEM_PROMPT),
-                MessagesPlaceholder(variable_name="chat_history", optional=True),
-                ("human", "{input}"),
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
-            ])
-
-            # 创建 ReAct Agent
-            agent = create_react_agent(llm, tools, prompt)
-            agent_executor = AgentExecutor(
-                agent=agent,
-                tools=tools,
-                verbose=False,
-                handle_parsing_errors=True,
-                max_iterations=5,
-                return_intermediate_steps=True,
-            )
-
-            # 准备历史消息
-            chat_history = []
-            if history:
-                for msg in history:
-                    if msg.get("role") == "user":
-                        chat_history.append(("human", msg["content"]))
-                    elif msg.get("role") == "assistant":
-                        chat_history.append(("ai", msg["content"]))
-
-            # 执行 Agent
-            result = agent_executor.invoke({
-                "input": content,
-                "chat_history": chat_history,
-            })
+            # 调用 detection_agent.chat()（异步 → 同步）
+            result = asyncio.run(detection_agent.chat(content, history))
 
             reply_content = result.get("output", "抱歉，无法处理您的请求。")
 
@@ -425,14 +366,6 @@ class ChatService:
 
             return reply_content, tool_calls, tool_result_str.strip(), tokens_used, latency_ms
 
-        except ImportError as e:
-            logger.error("LangChain 依赖未安装: %s", e)
-            reply = (
-                "ReAct Agent 初始化失败：缺少 LangChain 依赖。"
-                "请确保已安装 langchain、langchain-openai、langchain-community。"
-            )
-            latency_ms = int((time.time() - start_time) * 1000)
-            return reply, [], "", 0, latency_ms
         except Exception as e:
             logger.exception("ReAct Agent 执行失败")
             reply = f"AI 服务暂时不可用，请稍后重试。（错误：{str(e)}）"
@@ -735,117 +668,52 @@ class ChatService:
                         yield f"event: text_chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
                         yield f"event: token\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
             else:
-                # ── 真实模式：使用 LangChain Agent 流式输出 ──
+                # ── 真实模式：复用 DetectionAgent 单例流式输出 ──
                 try:
-                    from langchain_openai import ChatOpenAI
-                    from langchain.agents import create_react_agent, AgentExecutor
-                    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+                    if not detection_agent.available:
+                        raise RuntimeError("DetectionAgent 不可用，请检查 LLM 配置")
 
-                    from app.agent.prompts import DETECTION_AGENT_SYSTEM_PROMPT
-                    from app.agent.tools.detection_tool import (
-                        detect_single_image,
-                        detect_batch_images,
-                        detect_zip_images_file,
-                        detect_video_file,
-                    )
-                    from app.agent.tools.knowledge_tool import search_knowledge
-                    from app.agent.tools.stats_tool import (
-                        query_detection_stats,
-                        query_detection_history,
-                    )
-                    from app.agent.tools.user_tool import query_user_list
-
-                    tools = [
-                        detect_single_image,
-                        detect_batch_images,
-                        detect_zip_images_file,
-                        detect_video_file,
-                        search_knowledge,
-                        query_detection_stats,
-                        query_detection_history,
-                        query_user_list,
-                    ]
-
-                    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, max_tokens=2048, streaming=True)
-
-                    prompt = ChatPromptTemplate.from_messages([
-                        ("system", DETECTION_AGENT_SYSTEM_PROMPT),
-                        MessagesPlaceholder(variable_name="chat_history", optional=True),
-                        ("human", "{input}"),
-                        MessagesPlaceholder(variable_name="agent_scratchpad"),
-                    ])
-
-                    agent = create_react_agent(llm, tools, prompt)
-                    agent_executor = AgentExecutor(
-                        agent=agent,
-                        tools=tools,
-                        verbose=False,
-                        handle_parsing_errors=True,
-                        max_iterations=5,
-                        return_intermediate_steps=True,
-                    )
-
-                    chat_history = []
-                    if history:
-                        for msg in history:
-                            if msg.get("role") == "user":
-                                chat_history.append(("human", msg["content"]))
-                            elif msg.get("role") == "assistant":
-                                chat_history.append(("ai", msg["content"]))
-
-                    # 使用 astream_events 实现流式输出
                     full_content = ""
                     tool_calls = []
                     tool_result = ""
-                    async for event in agent_executor.astream_events(
-                        {"input": data.content, "chat_history": chat_history},
-                        version="v2",
-                    ):
-                        kind = event.get("event", "")
-                        if kind == "on_chat_model_stream":
-                            chunk_data = event.get("data", {}).get("chunk", None)
-                            if chunk_data and hasattr(chunk_data, "content") and chunk_data.content:
-                                token_text = chunk_data.content
-                                full_content += token_text
-                                # text_chunk 新事件名，保留 token 向后兼容
-                                yield f"event: text_chunk\ndata: {json.dumps({'content': token_text}, ensure_ascii=False)}\n\n"
-                                yield f"event: token\ndata: {json.dumps({'content': token_text}, ensure_ascii=False)}\n\n"
-                        elif kind == "on_tool_start":
-                            tool_name = event.get("name", "")
-                            tool_input = event.get("data", {}).get("input", {})
+
+                    async for event in detection_agent.chat_stream(data.content, history):
+                        event_type = event.get("type", "")
+
+                        if event_type == "text_chunk":
+                            token_text = event.get("content", "")
+                            full_content += token_text
+                            yield f"event: text_chunk\ndata: {json.dumps({'content': token_text}, ensure_ascii=False)}\n\n"
+                            yield f"event: token\ndata: {json.dumps({'content': token_text}, ensure_ascii=False)}\n\n"
+
+                        elif event_type == "tool_call":
+                            tool_name = event.get("tool", "")
+                            tool_input = event.get("input", {})
                             tool_calls.append({"tool": tool_name, "args": tool_input})
-                            # tool_start 新事件名，保留 tool_call 向后兼容
                             tool_start_data = {'tool': tool_name, 'args': tool_input}
                             yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
                             yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
-                        elif kind == "on_tool_end":
-                            tool_output = event.get("data", {}).get("output", "")
+
+                        elif event_type == "tool_result":
+                            tool_output = event.get("result", "")
+                            tool_name = event.get("tool", "")
                             if tool_output:
                                 tool_result += str(tool_output) + "\n"
-                                # tool_end 新事件名
-                                tool_end_data = {'tool': event.get("name", ""), 'result': str(tool_output)[:500]}
+                                tool_end_data = {'tool': tool_name, 'result': str(tool_output)[:500]}
                                 yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+
+                        elif event_type == "error":
+                            error_content = event.get("content", "")
+                            yield f"event: error\ndata: {json.dumps({'message': error_content}, ensure_ascii=False)}\n\n"
 
                     if not full_content:
                         full_content = "抱歉，无法处理您的请求。"
 
-                except ImportError as e:
-                    logger.error("LangChain 依赖未安装: %s", e)
-                    full_content = (
-                        "ReAct Agent 初始化失败：缺少 LangChain 依赖。"
-                        "请确保已安装 langchain、langchain-openai、langchain-community。"
-                    )
-                    tool_calls = []
-                    tool_result = ""
-                    # text_chunk 新事件名，保留 token 向后兼容
-                    yield f"event: text_chunk\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
-                    yield f"event: token\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
                 except Exception as e:
                     logger.exception("SSE Agent 执行失败")
                     full_content = f"AI 服务暂时不可用，请稍后重试。"
                     tool_calls = []
                     tool_result = ""
-                    # text_chunk 新事件名，保留 token 向后兼容
                     yield f"event: text_chunk\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
                     yield f"event: token\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
 

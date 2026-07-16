@@ -25,7 +25,7 @@ const isAuthPage = () => {
  */
 request.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem('rsod_token')
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
@@ -64,8 +64,8 @@ request.interceptors.response.use(
         if (!isAuthPage()) {
           // 登录已过期，清除本地存储并跳转登录页
           ElMessage.error('登录已过期，请重新登录')
-          localStorage.removeItem('token')
-          localStorage.removeItem('refreshToken')
+          localStorage.removeItem('rsod_token')
+localStorage.removeItem('rsod_refresh_token')
           localStorage.removeItem('user')
           window.location.href = '/login'
         }
