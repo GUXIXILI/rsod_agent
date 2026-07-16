@@ -1,7 +1,7 @@
 """add chat attachments table
 
-Revision ID: e5f6a7b8c9d0
-Revises: d4e5f6a7b8c9
+Revision ID: f6a7b8c9d0e
+Revises: e5f6a7b8c9d0
 Create Date: 2026-07-16
 """
 
@@ -11,8 +11,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "e5f6a7b8c9d0"
-down_revision: Union[str, None] = "d4e5f6a7b8c9"
+revision: str = "f6a7b8c9d0e"
+down_revision: Union[str, None] = "e5f6a7b8c9d0"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
