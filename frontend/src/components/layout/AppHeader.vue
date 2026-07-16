@@ -7,7 +7,7 @@
         <!-- Logo 占位图标，后续可替换为实际 Logo 图片 -->
         <span class="app-header__logo-icon">RS</span>
       </div>
-      <h1 class="app-header__title">RSOD Agent Platform</h1>
+      <h1 class="app-header__title">fire plaform</h1>
     </div>
 
     <!-- 右侧：用户下拉菜单 -->
