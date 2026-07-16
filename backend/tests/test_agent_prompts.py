@@ -2,7 +2,7 @@
 
 from app.agent.prompts import (
     DETECTION_AGENT_SYSTEM_PROMPT,
-    RAG_AGENT_SYSTEM_PROMPT,
+    RAG_QA_PROMPT,
     SUPERVISOR_SYSTEM_PROMPT,
 )
 
@@ -18,6 +18,6 @@ def test_detection_prompt_lists_all_detection_tools():
 
 
 def test_prompts_enforce_stub_and_grounded_results():
-    assert "stub=true" in DETECTION_AGENT_SYSTEM_PROMPT
-    assert "不得编造" in RAG_AGENT_SYSTEM_PROMPT
-    assert "LLM_STUB_MODE=true" in SUPERVISOR_SYSTEM_PROMPT
+    assert "attachment_id" in DETECTION_AGENT_SYSTEM_PROMPT
+    assert "不要编造信息" in RAG_QA_PROMPT
+    assert "stub=true" in SUPERVISOR_SYSTEM_PROMPT
