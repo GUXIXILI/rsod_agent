@@ -15,6 +15,7 @@ if str(BACKEND_ROOT) not in sys.path:
 from app.services.model_evaluation_service import (  # noqa: E402
     ModelEvaluationError,
     evaluate_model,
+    validate_evaluation_parameters,
 )
 
 
@@ -75,6 +76,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     try:
+        validate_evaluation_parameters(
+            imgsz=args.imgsz,
+            batch=args.batch,
+            device=args.device,
+        )
         report = evaluate_model(
             model_path=args.model,
             data_path=args.data,

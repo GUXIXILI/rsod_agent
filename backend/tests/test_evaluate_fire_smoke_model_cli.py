@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.services.model_evaluation_service import ModelEvaluationError
 from tools.evaluate_fire_smoke_model import build_parser, main
 
@@ -79,3 +81,31 @@ def test_main_returns_one_for_evaluation_error(
 
     assert exit_code == 1
     assert "ERROR: model failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--imgsz", "1296"], "imgsz"),
+        (["--batch", "65"], "batch"),
+        (["--device", "0,1"], "device"),
+        (["--device", "cpu0"], "device"),
+    ],
+)
+def test_main_rejects_invalid_runtime_parameters(
+    arguments, message, monkeypatch, capsys
+):
+    called = False
+
+    def fake_evaluate_model(**kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "tools.evaluate_fire_smoke_model.evaluate_model",
+        fake_evaluate_model,
+    )
+
+    assert main(arguments) == 1
+    assert called is False
+    assert message in capsys.readouterr().err

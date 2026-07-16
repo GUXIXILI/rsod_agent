@@ -121,7 +121,7 @@ def test_evaluate_model_runs_validation_and_writes_report(
         "plots": True,
         "project": str(output_dir.parent.resolve()),
         "name": output_dir.name,
-        "exist_ok": False,
+        "exist_ok": True,
         "verbose": False,
     }]
 
@@ -143,4 +143,49 @@ def test_evaluate_model_rejects_missing_input_file(
             model_path=model_path,
             data_path=data_path,
             output_dir=tmp_path / "evaluation",
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"imgsz": 288}, "imgsz"),
+        ({"imgsz": 1312}, "imgsz"),
+        ({"batch": 0}, "batch"),
+        ({"batch": 65}, "batch"),
+        ({"device": "0,1"}, "device"),
+        ({"device": "cpu0"}, "device"),
+    ],
+)
+def test_evaluate_model_rejects_invalid_runtime_parameters(
+    tmp_path, overrides, message
+):
+    arguments = {
+        "model_path": tmp_path / "missing-model.pt",
+        "data_path": tmp_path / "missing-data.yaml",
+        "output_dir": tmp_path / "evaluation",
+        "imgsz": 640,
+        "batch": 16,
+        "device": "cpu",
+    }
+    arguments.update(overrides)
+
+    with pytest.raises(ModelEvaluationError, match=message):
+        evaluate_model(**arguments)
+
+
+def test_evaluate_model_rejects_nonempty_output_directory(tmp_path):
+    model_path = tmp_path / "best.pt"
+    model_path.write_bytes(b"fake-model")
+    data_path = tmp_path / "data.yaml"
+    data_path.write_text("names: {0: fire, 1: smoke}\n", encoding="utf-8")
+    output_dir = tmp_path / "evaluation"
+    output_dir.mkdir()
+    (output_dir / "old-result.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ModelEvaluationError, match="not empty"):
+        evaluate_model(
+            model_path=model_path,
+            data_path=data_path,
+            output_dir=output_dir,
         )

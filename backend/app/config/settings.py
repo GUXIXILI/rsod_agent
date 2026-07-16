@@ -96,6 +96,7 @@ class Settings(BaseSettings):
 
     # Fire/smoke inference configuration
     FIRE_SMOKE_MODEL_PATH: str = "runs/train/54/d63a63d7-e43b-4eee-a70b-7e9df0ed8f1a/train/weights/best.pt"
+    MODEL_ARTIFACT_ROOTS: str = "runs,models"
     FIRE_SMOKE_DEVICE: str = "0"
     FIRE_SMOKE_IMAGE_FIRE_THRESHOLD: float = 0.25
     FIRE_SMOKE_IMAGE_SMOKE_THRESHOLD: float = 0.20

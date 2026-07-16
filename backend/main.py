@@ -199,11 +199,6 @@ if os.path.isdir(FRONTEND_DIST):
             return FileResponse(real_requested)
         # 否则返回 index.html（SPA 路由）
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
-
-    # 根路径也返回前端页面（覆盖后面的 JSON 回退）
-    @app.get("/")
-    async def serve_root():
-        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
 else:
     # ── 无前端构建产物时的根路径回退 ────────────────────
     @app.get("/")
