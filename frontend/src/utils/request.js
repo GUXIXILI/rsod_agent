@@ -65,7 +65,7 @@ request.interceptors.response.use(
           // 登录已过期，清除本地存储并跳转登录页
           ElMessage.error('登录已过期，请重新登录')
           localStorage.removeItem('rsod_token')
-localStorage.removeItem('rsod_refresh_token')
+          localStorage.removeItem('rsod_refresh_token')
           localStorage.removeItem('user')
           window.location.href = '/login'
         }

@@ -282,7 +282,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { View, Delete, PictureFilled } from '@element-plus/icons-vue'
 import { getHistoryTasks, getHistoryTaskDetail, deleteHistoryTask } from '@/api/history'
 import { getActiveScenes } from '@/api/training'
-import request from '@/utils/request'
 
 // ---- 响应式数据 ----
 

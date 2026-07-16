@@ -4,7 +4,7 @@
 提供检测场景管理接口：
 - GET /api/scenes — 获取活跃场景列表（训练任务下拉框使用）
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user

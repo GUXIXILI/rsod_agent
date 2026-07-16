@@ -166,6 +166,12 @@ function processSSEMessage(message, onMessage) {
     if (!eventData.type && eventType) {
       eventData.type = eventType;
     }
+
+    // error 事件兼容旧版 message 字段，并确保 content 不为 undefined
+    if (eventData.type === "error") {
+      eventData.content = eventData.content ?? eventData.message ?? "";
+    }
+
     onMessage?.(eventData);
 
     // 遇到 done 事件，停止流

@@ -43,9 +43,35 @@ ACTION_MAP = {
 
 
 class AuditLogMiddleware(BaseHTTPMiddleware):
-    """操作审计日志中间件"""
+    """
+    操作审计日志中间件。
+
+    拦截所有写操作（POST/PUT/DELETE/PATCH），异步记录到 operation_logs 表。
+    GET 请求不记录，避免日志噪音。
+
+    审计流程：
+    1. 只拦截写操作（GET 等读操作直接放行）
+    2. 跳过不需要审计的路径（文档、健康检查等）
+    3. 从 JWT Token 中提取用户身份
+    4. 从请求路径中解析模块、操作类型、目标类型等信息
+    5. 读取请求体摘要（脱敏处理密码字段）
+    6. 实际请求执行后，通过 BackgroundTask 异步写入数据库
+    """
 
     async def dispatch(self, request: Request, call_next):
+        """
+        Starlette 中间件入口：拦截请求并记录审计日志。
+
+        对写操作请求，在请求执行前后收集审计信息，通过 BackgroundTask
+        异步写入数据库，确保不阻塞响应返回。
+
+        Args:
+            request: Starlette Request 对象
+            call_next: 下一个中间件或路由处理器
+
+        Returns:
+            Response: HTTP 响应对象
+        """
         method = request.method
 
         # 仅拦截写操作
@@ -117,7 +143,15 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         return response
 
     def _extract_user(self, request: Request) -> tuple:
-        """从 Authorization header 解析 JWT 获取 user_id"""
+        """
+        从 Authorization header 中解析 JWT Token 获取用户信息。
+
+        Args:
+            request: Starlette Request 对象
+
+        Returns:
+            tuple: (user_id, username)，未登录时返回 (None, None)
+        """
         auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
             return None, None
@@ -134,8 +168,20 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
     def _parse_path(self, path: str, method: str) -> tuple:
         """
-        从请求路径提取 module, action, target_type, target_id
-        例：/api/roles/5/permissions -> module=system, action=create, target_type=permission, target_id=5
+        从请求路径中提取审计元数据。
+
+        解析逻辑：
+        - 模块：根据路径第一段映射到业务模块（auth/detection/agent/system）
+        - 操作类型：根据 HTTP 方法映射（POST→create, PUT→update, DELETE→delete）
+        - 目标类型：取路径第一段作为操作对象类型
+        - 目标 ID：取路径中的第一个数字段
+
+        Args:
+            path: 请求路径，如 /api/roles/5/permissions
+            method: HTTP 方法
+
+        Returns:
+            tuple: (module, action, target_type, target_id)
         """
         # 移除 /api/ 前缀
         clean_path = path.replace("/api/", "", 1) if path.startswith("/api/") else path
@@ -162,7 +208,18 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         return module, action, target_type, target_id
 
     async def _read_body_summary(self, request: Request) -> str:
-        """读取请求体摘要（前 500 字符）"""
+        """
+        读取请求体内容并脱敏处理后返回摘要（前 500 字符）。
+
+        脱敏处理：自动隐藏 password、old_password、new_password 字段的值，
+        替换为 "***"，防止敏感信息泄露到审计日志中。
+
+        Args:
+            request: Starlette Request 对象
+
+        Returns:
+            str: 脱敏后的请求体摘要，读取失败时返回空字符串
+        """
         try:
             body = await request.body()
             if body:
@@ -182,7 +239,15 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         return ""
 
     def _save_log(self, **kwargs):
-        """写入 operation_logs 表"""
+        """
+        将审计日志写入 operation_logs 表。
+
+        使用独立的数据库会话，写入失败时回滚并记录警告日志，
+        确保审计日志记录失败不影响正常业务请求。
+
+        Args:
+            **kwargs: 审计日志字段，包括 user_id、module、action 等
+        """
         try:
             from app.database.session import SessionLocal
             from app.entity.db_models import OperationLog

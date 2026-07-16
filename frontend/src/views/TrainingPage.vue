@@ -455,8 +455,17 @@
 </template>
 
 <script setup>
-import { getActiveScenes } from "@/api/training";
-import request from "@/utils/request";
+/**
+ * TrainingPage.vue — 模型训练与监控页面
+ *
+ * 功能说明：
+ *   - 训练任务列表管理：查看、创建、停止训练任务
+ *   - 训练监控面板：实时指标卡片 + Loss/mAP 曲线图（ECharts）
+ *   - 模型操作：评估模型、导出模型（含 ONNX）、下载权重、测试图验证
+ *   - 训练表单：支持选择场景、基础模型、训练轮数、批次大小、图像尺寸、设备等
+ *   - 每 5 秒轮询获取训练指标，实时更新图表
+ */
+import { getActiveScenes, getTrainingTasks, startTraining, getTrainingStatus, getTrainingMetrics, stopTraining, validateModel as validateModelApi, exportModel as exportModelApi, predictModel as predictModelApi } from "@/api/training";
 import { Plus, Refresh, UploadFilled } from "@element-plus/icons-vue";
 import * as echarts from "echarts";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -535,6 +544,12 @@ const metricCards = computed(() => {
 });
 
 // ── 状态映射 ──
+
+/**
+ * 获取训练状态对应的 Element Plus Tag 类型
+ * @param {string} status - 训练状态（pending/running/completed/failed/cancelled）
+ * @returns {string} Tag 类型（info/warning/success/danger）
+ */
 function statusType(status) {
   const map = {
     pending: "info",
@@ -546,6 +561,11 @@ function statusType(status) {
   return map[status] || "info";
 }
 
+/**
+ * 获取训练状态的中文文本
+ * @param {string} status - 训练状态（pending/running/completed/failed/cancelled）
+ * @returns {string} 中文状态文本
+ */
 function statusText(status) {
   const map = {
     pending: "等待中",
@@ -558,6 +578,11 @@ function statusText(status) {
 }
 
 // ── 获取场景列表（动态加载） ──
+
+/**
+ * 获取活跃场景列表
+ * 用于训练表单中的场景选择下拉框
+ */
 async function fetchScenes() {
   try {
     const res = await getActiveScenes();
@@ -575,11 +600,16 @@ async function fetchScenes() {
 }
 
 // ── 获取任务列表 ──
+
+/**
+ * 获取训练任务列表
+ * 从后端获取所有训练任务，用于列表展示
+ */
 async function fetchTasks() {
   loadingTasks.value = true;
   try {
-    const res = await request.get("/training/tasks");
-    taskList.value = Array.isArray(res) ? res : (res.items || []);
+    const res = await getTrainingTasks();
+    taskList.value = Array.isArray(res) ? res : (res.data?.items || res.items || []);
   } catch (e) {
     console.error("获取任务列表失败", e);
   } finally {
@@ -588,6 +618,12 @@ async function fetchTasks() {
 }
 
 // ── 选择任务并开始监控 ──
+
+/**
+ * 选择训练任务并开始监控
+ * 初始化 ECharts 图表、获取训练指标、启动轮询
+ * @param {Object} task - 训练任务对象
+ */
 async function selectTask(task) {
   selectedTask.value = task;
   evalReport.value = null;
@@ -601,6 +637,11 @@ async function selectTask(task) {
 }
 
 // ── 初始化 ECharts 图表 ──
+
+/**
+ * 初始化 ECharts 图表实例
+ * 销毁旧的图表实例，在 lossChartRef 和 mapChartRef 上创建新实例
+ */
 function initCharts() {
   if (lossChart) lossChart.dispose();
   if (mapChart) mapChart.dispose();
@@ -614,17 +655,22 @@ function initCharts() {
 }
 
 // ── 获取训练指标并更新图表 ──
+
+/**
+ * 获取训练指标并更新图表
+ * 同时获取当前任务状态，同步更新任务列表中的进度和 Epoch 信息
+ */
 async function fetchMetrics() {
   if (!selectedTask.value) return;
   try {
     const taskId = selectedTask.value.task_uuid;
-    const res = await request.get(`/training/metrics/${taskId}`);
-    const metrics = Array.isArray(res) ? res : (res.metrics || []);
+    const res = await getTrainingMetrics(taskId);
+    const metrics = Array.isArray(res) ? res : (res.data?.metrics || res.metrics || []);
 
     // 更新任务状态
-    const statusRes = await request.get(`/training/status/${taskId}`);
+    const statusRes = await getTrainingStatus(taskId);
     if (statusRes) {
-      selectedTask.value = { ...selectedTask.value, ...statusRes };
+      selectedTask.value = { ...selectedTask.value, ...statusRes.data || statusRes };
 
       // 同步更新任务列表中的进度（进度条 + Epoch 显示）
       const idx = taskList.value.findIndex((t) => t.id === statusRes.id);
@@ -647,6 +693,12 @@ async function fetchMetrics() {
 }
 
 // ── 更新图表 ──
+
+/**
+ * 更新训练监控图表
+ * 渲染 Loss 曲线（Box Loss / Cls Loss / DFL Loss）和评估指标曲线（mAP@50 / mAP@50-95 / Precision / Recall）
+ * @param {Array} metrics - 训练指标数组，每项包含 epoch、box_loss、cls_loss、map50 等字段
+ */
 function updateCharts(metrics) {
   const epochs = metrics.map((m) => m.epoch);
 
@@ -744,6 +796,11 @@ function updateCharts(metrics) {
 }
 
 // ── 轮询监控 ──
+
+/**
+ * 启动轮询监控
+ * 每 5 秒获取一次训练指标，实时更新图表
+ */
 function startPolling() {
   stopPolling();
   pollTimer = setInterval(() => {
@@ -753,6 +810,10 @@ function startPolling() {
   }, 5000); // 每 5 秒轮询一次
 }
 
+/**
+ * 停止轮询监控
+ * 清除定时器，释放资源
+ */
 function stopPolling() {
   if (pollTimer) {
     clearInterval(pollTimer);
@@ -761,16 +822,22 @@ function stopPolling() {
 }
 
 // ── 创建训练任务 ──
+
+/**
+ * 创建训练任务
+ * 提交训练表单数据到后端，创建成功后自动选中新任务并开始监控
+ */
 async function createTask() {
   creating.value = true;
   try {
-    const res = await request.post("/training/start", trainForm.value);
-    ElMessage.success(`训练任务已创建：${res.task_uuid}`);
+    const res = await startTraining(trainForm.value);
+    const resData = res.data || res;
+    ElMessage.success(`训练任务已创建：${resData.task_uuid}`);
     showCreateDialog.value = false;
     await fetchTasks();
     // 自动选中新创建的任务
-    if (res.id) {
-      const newTask = taskList.value.find((t) => t.id === res.id);
+    if (resData.id) {
+      const newTask = taskList.value.find((t) => t.id === resData.id);
       if (newTask) selectTask(newTask);
     }
   } catch (e) {
@@ -781,6 +848,12 @@ async function createTask() {
 }
 
 // ── 停止训练任务 ──
+
+/**
+ * 停止训练任务
+ * 弹出确认框，确认后调用后端停止接口
+ * @param {string} taskId - 训练任务 UUID
+ */
 async function stopTask(taskId) {
   try {
     await ElMessageBox.confirm(
@@ -790,7 +863,7 @@ async function stopTask(taskId) {
         type: "warning",
       },
     );
-    await request.post(`/training/stop/${taskId}`);
+    await stopTraining(taskId);
     ElMessage.success("训练任务已停止");
     await fetchTasks();
   } catch (e) {
@@ -871,30 +944,39 @@ const perClassData = computed(() => {
 });
 
 // ── 【新增】表格行样式 ──
+
+/**
+ * 评估表格行样式
+ * AP@50 低于 0.5 的行添加红色背景样式
+ * @param {Object} param - 行对象 { row }
+ * @returns {string} CSS 类名
+ */
 function tableRowClassName({ row }) {
   return row.ap50 < 0.5 ? "weak-row" : "";
 }
 
 // ── 【新增】评估模型 ──
+
+/**
+ * 评估模型
+ * 调用后端验证接口，运行 model.val() 获取评估报告
+ * 包含整体指标（Precision/Recall/mAP）和每类 AP 数据
+ */
 async function validateModel() {
   if (!selectedTask.value) return;
   validating.value = true;
   try {
     const taskId = selectedTask.value.task_uuid;
-    // 评估需要运行 model.val()，在 CPU 上需要较长时间（30-120秒），增加超时到 5 分钟
-    const res = await request.post(
-      `/training/validate/${taskId}`,
-      {
-        split: "val",
-        conf: 0.001,
-        iou: 0.6,
-      },
-      { timeout: 300000 }, // 5 分钟超时
-    );
+    const res = await validateModelApi(taskId, {
+      split: "val",
+      conf: 0.001,
+      iou: 0.6,
+    });
     // 响应拦截器已解包 response.data，直接访问 res
-    evalReport.value = res;
+    evalReport.value = res.data || res;
+    const overall = (res.data || res).overall;
     ElMessage.success(
-      `评估完成: mAP50=${(res.overall.map50 * 100).toFixed(1)}%`,
+      `评估完成: mAP@50=${(overall.map50 * 100).toFixed(1)}%`,
     );
   } catch (e) {
     // 响应拦截器已显示具体错误，这里不再重复显示
@@ -904,17 +986,20 @@ async function validateModel() {
 }
 
 // ── 【新增】导出模型 ──
+
+/**
+ * 导出模型
+ * 调用后端导出接口，将训练完成的模型导出为可部署版本
+ * 支持设置版本号、版本描述、是否设为默认模型、是否上传 MinIO
+ */
 async function exportModel() {
   if (!selectedTask.value) return;
   exporting.value = true;
   try {
     const taskId = selectedTask.value.task_uuid;
-    const res = await request.post(
-      `/training/export/${taskId}`,
-      exportForm.value,
-    );
+    const res = await exportModelApi(taskId, exportForm.value);
     // 响应拦截器已解包 response.data，直接访问 res.message
-    ElMessage.success(res.message || "模型导出成功");
+    ElMessage.success(res.message || (res.data && res.data.message) || "模型导出成功");
     showExportDialog.value = false;
   } catch (e) {
     // 响应拦截器已显示具体错误，这里不再重复显示
@@ -924,6 +1009,11 @@ async function exportModel() {
 }
 
 // ── 【新增】下载模型 ──
+
+/**
+ * 下载模型权重文件
+ * 使用 fetch 下载 .pt 文件，通过浏览器触发下载
+ */
 async function downloadModel() {
   if (!selectedTask.value) return;
   try {
@@ -950,19 +1040,24 @@ async function downloadModel() {
 }
 
 // ── 【新增】导出 ONNX 模型 ──
+
+/**
+ * 导出 ONNX 格式模型
+ * 调用后端导出接口，指定 format: 'onnx' 导出 ONNX 模型
+ */
 async function exportONNX() {
   if (!selectedTask.value) return;
   onnxExporting.value = true;
   onnxExportUrl.value = null;
   try {
     const taskId = selectedTask.value.task_uuid;
-    const res = await request.post(`/training/export/${taskId}`, {
+    const res = await exportModelApi(taskId, {
       format: "onnx",
       ...exportForm.value,
     });
     // 保存 ONNX 下载 URL
-    onnxExportUrl.value = res.download_url || `/training/download/${taskId}?format=onnx`;
-    ElMessage.success(res.message || "ONNX 模型导出成功");
+    onnxExportUrl.value = (res.data || res).download_url || `/training/download/${taskId}?format=onnx`;
+    ElMessage.success((res.data || res).message || "ONNX 模型导出成功");
   } catch (e) {
     // 响应拦截器已显示具体错误
   } finally {
@@ -971,6 +1066,11 @@ async function exportONNX() {
 }
 
 // ── 【新增】下载 ONNX 模型 ──
+
+/**
+ * 下载 ONNX 模型文件
+ * 使用 fetch 下载 .onnx 文件，通过浏览器触发下载
+ */
 async function downloadONNX() {
   if (!onnxExportUrl.value || !selectedTask.value) return;
   try {
@@ -999,12 +1099,24 @@ async function downloadONNX() {
 }
 
 // ── 【新增】测试图文件选择 ──
+
+/**
+ * 处理测试图文件选择
+ * 保存选中文件并清空之前的检测结果
+ * @param {Object} file - Element Plus Upload 组件返回的文件对象
+ */
 function handlePredictFileChange(file) {
   predictFile.value = file.raw;
   predictResult.value = null;
 }
 
 // ── 【新增】运行测试图预测 ──
+
+/**
+ * 运行测试图预测
+ * 使用选中的训练模型对测试图进行推理检测，
+ * 展示标注图片和检测目标列表
+ */
 async function runPredict() {
   if (!predictFile.value || !selectedTask.value) return;
   predicting.value = true;
@@ -1016,12 +1128,9 @@ async function runPredict() {
     formData.append("conf", predictConf.value);
     formData.append("iou", predictIou.value);
 
-    // 响应拦截器已解包 response.data，直接访问 res
-    const res = await request.post("/training/predict", formData, {
-      headers: { "Content-Type": "multipart/form-data" },
-    });
-    predictResult.value = res;
-    ElMessage.success(`检测完成: 发现 ${res.total_objects} 个目标`);
+    const res = await predictModelApi(formData);
+    predictResult.value = res.data || res;
+    ElMessage.success(`检测完成: 发现 ${(res.data || res).total_objects} 个目标`);
   } catch (e) {
     // 响应拦截器已显示具体错误，这里不再重复显示
   } finally {

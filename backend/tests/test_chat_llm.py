@@ -180,7 +180,7 @@ class TestSendMessageStream:
 
         assert len(events) == 1
         assert "event: error" in events[0]
-        assert "message" in events[0]
+        assert "content" in events[0]
 
     async def test_stream_creates_session_if_none(self, db_session, create_test_user):
         """session_id 为空时自动创建会话"""

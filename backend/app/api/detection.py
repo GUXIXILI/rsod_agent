@@ -1,4 +1,18 @@
-"""Authenticated fire/smoke inference and persisted detection endpoints."""
+"""
+检测 API 路由
+
+提供火焰/烟雾检测的核心接口：
+- POST /api/detection/image          — 单张图片检测（原始推理接口）
+- POST /api/detection/video/frame    — 视频帧检测（逐帧确认）
+- DELETE /api/detection/video/{stream_id} — 重置视频流确认状态
+- POST /api/detection/single         — 单图检测（持久化版本）
+- POST /api/detection/batch          — 批量图片检测
+- POST /api/detection/video          — 视频文件检测
+- POST /api/detection/zip            — ZIP 压缩包批量检测
+- GET  /api/detection/tasks/{task_id} — 检测任务详情
+- GET  /api/detection/alerts         — 火灾预警列表
+- GET  /api/detection/video/progress/{task_id} — 视频检测进度
+"""
 
 from __future__ import annotations
 
@@ -65,6 +79,21 @@ class DetectionResponse(BaseModel):
 
 
 async def _read_image(file: UploadFile) -> Image.Image:
+    """
+    读取并校验上传的图片文件。
+
+    校验内容：文件类型必须是 image/*、文件非空、大小不超过 20MB、
+    文件内容为有效图片格式。校验通过后转换为 RGB 格式的 PIL Image。
+
+    Args:
+        file: FastAPI UploadFile 对象
+
+    Returns:
+        PIL.Image.Image: RGB 格式的图片对象
+
+    Raises:
+        HTTPException: 文件类型不支持、文件为空、文件过大或格式无效时抛出
+    """
     if file.content_type and not file.content_type.startswith("image/"):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -97,6 +126,25 @@ def _run_detection(
     iou_threshold: float,
     image_size: int,
 ):
+    """
+    调用火灾烟雾检测服务执行推理。
+
+    封装 fire_smoke_detection_service.detect() 调用，
+    将检测异常转换为 HTTP 503 错误响应。
+
+    Args:
+        image: PIL Image 对象（RGB 格式）
+        fire_threshold: 火焰类别置信度阈值
+        smoke_threshold: 烟雾类别置信度阈值
+        iou_threshold: NMS 非极大值抑制 IoU 阈值
+        image_size: 推理图像尺寸
+
+    Returns:
+        InferenceResult: 检测结果对象
+
+    Raises:
+        HTTPException: 模型权重缺失、参数无效或推理失败时抛出 503
+    """
     try:
         return fire_smoke_detection_service.detect(
             image=image,
@@ -120,6 +168,24 @@ def _build_response(
     thresholds: dict[str, float],
     confirmation: dict[str, ConfirmationState] | None = None,
 ) -> dict[str, Any]:
+    """
+    将检测结果组装为 API 响应字典。
+
+    功能：
+    1. 提取检测结果的核心字段（detections, image_width 等）
+    2. 统计 fire 和 smoke 的检测数量
+    3. 如果有连续帧确认状态，序列化确认信息
+    4. 汇总所有字段到统一的响应格式
+
+    Args:
+        result: InferenceResult 检测结果对象
+        mode: 检测模式（"image" 或 "video_frame"）
+        thresholds: 各类别的置信度阈值配置
+        confirmation: 连续帧确认状态映射（视频帧检测时传入）
+
+    Returns:
+        dict: 包含 mode、检测结果、阈值、计数、确认状态的响应字典
+    """
     payload = result.to_dict()
     counts = {"fire": 0, "smoke": 0}
     for item in result.detections:
@@ -286,6 +352,7 @@ async def detect_single(
                 "smoke_object_count": task.smoke_object_count,
                 "total_objects": task.fire_object_count + task.smoke_object_count,
                 "annotated_url": task.annotated_url,
+                "annotated_image_base64": getattr(task, "annotated_image_base64", None),
                 "inference_time": task.total_inference_time or 0,
                 "class_counts": {
                     "fire": task.fire_object_count or 0,
@@ -526,10 +593,10 @@ def get_video_progress(task_id: int, current_user=Depends(get_current_user)):
     try:
         data = r.get(f"video:progress:{task_id}")
         if data:
-            return {"code": 200, "data": json.loads(data)}
-        return {"code": 200, "data": {"progress": -1, "message": "任务未找到或已完成"}}
+            return {"code": 200, "message": "success", "data": json.loads(data)}
+        return {"code": 200, "message": "任务未找到或已完成", "data": {"progress": -1}}
     except Exception:
-        return {"code": 200, "data": {"progress": -1, "message": "Redis 不可用"}}
+        return {"code": 200, "message": "Redis 不可用", "data": {"progress": -1}}
 
 
 # ══════════════════════════════════════════════════════════════

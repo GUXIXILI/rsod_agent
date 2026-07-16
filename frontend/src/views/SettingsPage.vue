@@ -114,7 +114,7 @@
  *   - API：GET /api/user/profile 获取个人信息
  *   - API：PUT /api/user/password 修改密码
  */
-import request from "@/utils/request";
+import { getProfileApi, changePasswordApi } from "@/api/auth";
 import { ElMessage } from "element-plus";
 import { onMounted, reactive, ref } from "vue";
 
@@ -171,10 +171,15 @@ function formatDateTime(dateStr) {
 }
 
 // ── 获取个人信息 ──
+
+/**
+ * 获取当前用户个人信息
+ * 调用 GET /api/user/profile 接口，展示用户名、邮箱、角色、账户状态、注册时间
+ */
 async function fetchProfile() {
   profileLoading.value = true;
   try {
-    const res = await request.get("/user/profile");
+    const res = await getProfileApi();
     // 响应拦截器已解包 response.data
     profile.value = res.data || res;
   } catch (e) {
@@ -185,13 +190,19 @@ async function fetchProfile() {
 }
 
 // ── 修改密码 ──
+
+/**
+ * 处理修改密码请求
+ * 验证表单后调用 PUT /api/user/password 接口，
+ * 成功后清除登录状态并跳转到登录页
+ */
 async function handleChangePassword() {
   const valid = await passwordFormRef.value?.validate().catch(() => false);
   if (!valid) return;
 
   passwordLoading.value = true;
   try {
-    await request.put("/user/password", {
+    await changePasswordApi({
       old_password: passwordForm.old_password,
       new_password: passwordForm.new_password,
     });

@@ -10,6 +10,10 @@ import os
 import re
 from typing import List, Dict
 
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class DocumentLoader:
     """
@@ -48,7 +52,7 @@ class DocumentLoader:
         documents = []
 
         if not os.path.isdir(self.knowledge_base_dir):
-            print(f"知识库目录不存在: {self.knowledge_base_dir}")
+            logger.warning(f"知识库目录不存在: {self.knowledge_base_dir}")
             return documents
 
         for filename in sorted(os.listdir(self.knowledge_base_dir)):
@@ -60,7 +64,7 @@ class DocumentLoader:
                 with open(filepath, "r", encoding="utf-8") as f:
                     content = f.read()
             except Exception as e:
-                print(f"读取文档失败 {filename}: {e}")
+                logger.warning(f"读取文档失败 {filename}: {e}")
                 continue
 
             if not content.strip():

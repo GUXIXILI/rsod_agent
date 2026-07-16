@@ -3,7 +3,7 @@
 处理用户管理、模型管理等管理员业务逻辑
 """
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from app.entity.db_models import (
     User, UserRole, Role,
     ModelVersion, DetectionTask, DetectionResult,
@@ -34,18 +34,18 @@ class AdminService:
         Returns:
             用户列表，每项包含角色信息
         """
-        users = db.query(User).order_by(User.id.asc()).offset(skip).limit(limit).all()
+        users = (
+            db.query(User)
+            .options(selectinload(User.user_roles).selectinload(UserRole.role))
+            .order_by(User.id.asc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
         total = db.query(User).count()
 
-        result = []
-        for user in users:
-            roles = (
-                db.query(Role.name)
-                .join(UserRole, UserRole.role_id == Role.id)
-                .filter(UserRole.user_id == user.id)
-                .all()
-            )
-            result.append({
+        result = [
+            {
                 "id": user.id,
                 "username": user.username,
                 "email": user.email,
@@ -53,10 +53,12 @@ class AdminService:
                 "avatar": user.avatar,
                 "is_active": user.is_active,
                 "is_superuser": user.is_superuser,
-                "roles": [r.name for r in roles],
+                "roles": [ur.role.name for ur in user.user_roles],
                 "last_login_at": user.last_login_at,
                 "created_at": user.created_at,
-            })
+            }
+            for user in users
+        ]
 
         return {"total": total, "items": result}
 

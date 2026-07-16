@@ -13,9 +13,11 @@ import shutil
 import tempfile
 import threading
 import uuid
+
+from sqlalchemy.orm import selectinload
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -166,7 +168,9 @@ class TrainingService:
 
         返回任务基本信息 + 最新 epoch 指标
         """
-        task = db.query(TrainingTask).filter(
+        task = db.query(TrainingTask).options(
+            selectinload(TrainingTask.scene)
+        ).filter(
             TrainingTask.task_uuid == task_id
         ).first()
         if task is None:
@@ -238,8 +242,10 @@ class TrainingService:
         """
         返回用户训练任务列表，按创建时间倒序
         """
+        from app.entity.db_models import DetectionScene
         tasks = (
             db.query(TrainingTask)
+            .options(selectinload(TrainingTask.scene))
             .filter(TrainingTask.user_id == int(user_id))
             .order_by(TrainingTask.created_at.desc())
             .limit(limit)

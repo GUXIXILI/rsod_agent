@@ -116,8 +116,8 @@
           </div>
           <div v-else class="detection-list">
             <div
-              v-for="(det, index) in currentDetections"
-              :key="index"
+              v-for="det in currentDetections"
+              :key="det._uid"
               class="detection-item"
             >
               <div class="det-info">
@@ -244,6 +244,7 @@ const frameCount = ref(0)
 const inferenceTime = ref(0)
 const objectCount = ref(0)
 const currentDetections = ref([])
+let _uidCounter = 0
 
 // ── 火情预警 ──
 const fireLevel = ref('safe')
@@ -255,6 +256,12 @@ const lastAlertTime = ref('')
 let ws = null
 let mediaStream = null
 let lastFireLevel = 'safe'
+
+// WebSocket 重连相关
+let _reconnectTimer = null
+let _reconnectAttempts = 0
+const _MAX_RECONNECT_ATTEMPTS = 5
+const _RECONNECT_BASE_DELAY = 1000  // 初始延迟 1 秒
 
 // ── 计算属性 ──
 const statusText = computed(() => {
@@ -293,6 +300,13 @@ const alertLevelText = computed(() => {
 })
 
 // ── 开启摄像头 ──
+
+/**
+ * 开启摄像头并建立 WebSocket 检测连接
+ * 1. 获取浏览器摄像头权限（320x240 低分辨率）
+ * 2. 将媒体流绑定到 video 元素
+ * 3. 建立 WebSocket 连接
+ */
 async function startCamera() {
   try {
     isConnecting.value = true
@@ -320,6 +334,11 @@ async function startCamera() {
 }
 
 // ── 建立 WebSocket 连接 ──
+
+/**
+ * 建立 WebSocket 连接，发送配置消息并接收检测结果
+ * 使用 ws:// 或 wss:// 协议，从 localStorage 获取 token 进行认证
+ */
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
@@ -330,6 +349,7 @@ function connectWebSocket() {
 
   ws.onopen = () => {
     console.log('[WebSocket] 连接已建立')
+    _reconnectAttempts = 0  // 重置重连计数
 
     // 发送 config 配置消息
     // CPU 模式 image_size=320（优化），GPU 模式 image_size=640
@@ -354,7 +374,7 @@ function connectWebSocket() {
         frameCount.value = data.frame_count || 0
         inferenceTime.value = data.inference_time || 0
         objectCount.value = data.object_count || 0
-        currentDetections.value = data.detections || []
+        currentDetections.value = (data.detections || []).map(d => ({ ...d, _uid: ++_uidCounter }))
 
         // 渲染标注帧到 Canvas
         if (data.annotated_frame) {
@@ -395,16 +415,33 @@ function connectWebSocket() {
   ws.onclose = () => {
     console.log('[WebSocket] 连接已关闭')
     isConnecting.value = false
+    // 非主动关闭时尝试重连
+    if (isRunning.value && _reconnectAttempts < _MAX_RECONNECT_ATTEMPTS) {
+      const delay = _RECONNECT_BASE_DELAY * Math.pow(2, _reconnectAttempts)
+      _reconnectAttempts++
+      console.log(`[WebSocket] 将在 ${delay}ms 后尝试第 ${_reconnectAttempts} 次重连...`)
+      _reconnectTimer = setTimeout(() => {
+        if (isRunning.value) {
+          connectWebSocket()
+        }
+      }, delay)
+    }
   }
 
   ws.onerror = (err) => {
     console.error('[WebSocket] 连接错误:', err)
-    ElMessage.error('WebSocket 连接失败，请检查后端服务')
     isConnecting.value = false
   }
 }
 
 // ── 发送单帧（响应驱动，收到 result 渲染后调用） ──
+
+/**
+ * 发送单帧到后端进行检测
+ * 从 video 元素捕获当前帧，使用编码 Canvas 压缩为 JPEG（0.45 质量），
+ * 通过 WebSocket 发送 base64 编码的帧数据
+ * 采用响应驱动模式：收到 result 渲染完成后才发送下一帧
+ */
 function sendSingleFrame() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return
   if (!videoRef.value || videoRef.value.readyState < 2) return
@@ -437,6 +474,13 @@ function sendSingleFrame() {
 }
 
 // ── 渲染标注帧到 Canvas ──
+
+/**
+ * 渲染后端返回的标注帧到 Canvas
+ * 将 base64 编码的 JPEG 图片绘制到可见的 Canvas 上，
+ * 渲染完成后触发下一帧发送（响应驱动模式）
+ * @param {string} annotatedBase64 - 后端返回的标注帧 base64 数据
+ */
 function renderAnnotatedFrame(annotatedBase64) {
   if (!canvasRef.value) return
 
@@ -455,7 +499,19 @@ function renderAnnotatedFrame(annotatedBase64) {
 }
 
 // ── 停止摄像头 ──
+
+/**
+ * 停止摄像头检测
+ * 关闭 WebSocket 连接、释放摄像头媒体流、重置所有状态变量
+ */
 function stopCamera() {
+  // 清除重连定时器
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer)
+    _reconnectTimer = null
+  }
+  _reconnectAttempts = 0
+
   // 关闭 WebSocket
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'close' }))
@@ -493,6 +549,12 @@ function stopCamera() {
 }
 
 // ── 生成报告 ──
+
+/**
+ * 生成当前检测报告
+ * 汇总实时检测数据（目标数、FPS、推理耗时、火情等级等），
+ * 以对话框形式展示，支持一键复制到剪贴板
+ */
 function generateReport() {
   const lines = [
     '===== 摄像头检测报告 =====',

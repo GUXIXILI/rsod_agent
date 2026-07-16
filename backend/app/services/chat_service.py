@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import concurrent.futures
 import json
 import re
 import time
@@ -303,7 +304,7 @@ class ChatService:
         if settings.LLM_STUB_MODE:
             return self._run_agent_stub(content, history, files)
         else:
-            return self._run_agent_real(content, history)
+            return self._run_agent_real(content, history, files)
 
     def _run_agent_stub(self, content: str, history: list = None, files: list = None) -> tuple:
         """
@@ -368,6 +369,9 @@ class ChatService:
         if matched_tool:
             tool_name = matched_tool["name"]
             tool_args = self._extract_tool_args_from_stub(normalized, tool_name)
+            # 回退：如果 search_knowledge 没有提取到 query，使用用户消息内容
+            if tool_name == "search_knowledge" and "query" not in tool_args:
+                tool_args["query"] = normalized
             tool_calls = [{"tool": tool_name, "args": tool_args}]
 
             logger.info(
@@ -397,36 +401,66 @@ class ChatService:
 
         return reply, tool_calls, tool_result, tokens_used, latency_ms
 
-    def _run_agent_real(self, content: str, history: list = None) -> tuple:
+    def _run_agent_real(self, content: str, history: list = None, files: list = None) -> tuple:
         """
         真实模式：复用 DetectionAgent 单例执行对话。
 
         DetectionAgent 已在 detection_agent.py 中根据 settings 完成 LLM 配置，
         这里直接调用其 chat() 方法，避免重复创建 LLM 和 AgentExecutor 实例。
+
+        如果用户上传了图片，会先在函数内调用检测工具获取完整结果，再把文字摘要
+        注入提示词交给 Agent，避免把 base64 标注图送入 LLM 上下文导致 token 超限。
         """
         start_time = time.time()
+        tool_calls = []
+        tool_result_str = ""
 
         try:
             if not detection_agent.available:
                 raise RuntimeError("DetectionAgent 不可用，请检查 LLM 配置")
+
+            # 若用户上传图片，先直接检测并把摘要注入提示词
+            if files and self._has_image_file(files):
+                first_image_url = self._extract_first_image_url(files)
+                if first_image_url:
+                    tool_name = "detect_single_image"
+                    tool_args = {"image_path": first_image_url, "conf": 0.25, "iou": 0.45}
+                    tool_calls.append({"tool": tool_name, "args": tool_args})
+
+                    try:
+                        from app.agent.tools.detection_tool import detect_single_image
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                            tool_result_str = executor.submit(
+                                detect_single_image.invoke, tool_args
+                            ).result()
+                    except Exception as e:
+                        logger.exception("真实模式图片预处理检测失败")
+                        tool_result_str = json.dumps({"error": f"检测失败：{str(e)}"}, ensure_ascii=False)
+
+                    display_text = self._extract_tool_result_summary(tool_name, tool_result_str)
+                    content = (
+                        f"{content}\n\n【系统提示】已对用户上传的图片完成火灾烟雾检测，"
+                        f"检测结果摘要如下（请不要再次调用检测工具）：\n{display_text}\n"
+                        f"请直接基于以上结果回复用户。"
+                    )
 
             # 调用 detection_agent.chat()（异步 → 同步）
             result = asyncio.run(detection_agent.chat(content, history))
 
             reply_content = result.get("output", "抱歉，无法处理您的请求。")
 
-            # 提取工具调用信息
-            tool_calls = []
-            tool_result_str = ""
+            # 提取工具调用信息（Agent 可能基于系统提示不再调用检测工具）
             intermediate_steps = result.get("intermediate_steps", [])
             for step in intermediate_steps:
                 action, observation = step
-                tool_calls.append({
-                    "tool": action.tool,
-                    "args": action.tool_input,
-                })
-                if isinstance(observation, str):
-                    tool_result_str += observation + "\n"
+                # 仅记录非检测类工具的调用，避免重复记录已预处理的图片检测
+                if action.tool != "detect_single_image":
+                    tool_calls.append({
+                        "tool": action.tool,
+                        "args": action.tool_input,
+                    })
+                    if isinstance(observation, str):
+                        tool_result_str += observation + "\n"
 
             latency_ms = int((time.time() - start_time) * 1000)
             tokens_used = max(1, (len(content) + len(reply_content) + len(tool_result_str)) // 2)
@@ -437,7 +471,7 @@ class ChatService:
             logger.exception("ReAct Agent 执行失败")
             reply = f"AI 服务暂时不可用，请稍后重试。（错误：{str(e)}）"
             latency_ms = int((time.time() - start_time) * 1000)
-            return reply, [], "", 0, latency_ms
+            return reply, tool_calls, tool_result_str.strip(), 0, latency_ms
 
     # ══════════════════════════════════════════════════════════════
     # Stub 模式辅助方法
@@ -554,6 +588,10 @@ class ChatService:
             page_val = next(v for v in page_match.groups() if v is not None)
             args["page"] = int(page_val)
 
+        # 提取知识检索查询词（search_knowledge 工具）
+        if tool_name == "search_knowledge":
+            args["query"] = content
+
         return args
 
     def _invoke_tool_stub(self, tool_name: str, args: dict) -> str:
@@ -606,6 +644,7 @@ class ChatService:
         将工具调用结果格式化为自然语言回复。
 
         模拟 Agent 在获得工具结果后，生成用户友好的回复。
+        如果 tool_result 是 detect_single_image 返回的 JSON，则提取 summary 字段展示。
 
         Args:
             user_message: 用户原始消息
@@ -630,7 +669,34 @@ class ChatService:
 
         prefix = prefixes.get(tool_name, f"已为您执行{tool_description}，以下是结果：")
 
-        return f"{prefix}\n\n{tool_result}"
+        # 检测工具返回 JSON 时，优先展示 summary 文字，避免把 base64 输出到聊天正文
+        display_result = tool_result
+        if tool_name == "detect_single_image":
+            try:
+                parsed = json.loads(tool_result)
+                if isinstance(parsed, dict) and "summary" in parsed:
+                    display_result = parsed["summary"]
+            except json.JSONDecodeError:
+                pass
+
+        return f"{prefix}\n\n{display_result}"
+
+    @staticmethod
+    def _extract_tool_result_summary(tool_name: str, tool_result: str) -> str:
+        """
+        从工具结果中提取适合在聊天正文中展示的文字摘要。
+
+        对于 detect_single_image 返回的 JSON，提取 summary 字段，
+        避免将 base64 图片数据输出到聊天流中。
+        """
+        if tool_name == "detect_single_image":
+            try:
+                parsed = json.loads(tool_result)
+                if isinstance(parsed, dict) and "summary" in parsed:
+                    return parsed["summary"]
+            except json.JSONDecodeError:
+                pass
+        return tool_result
 
     @staticmethod
     def _build_stub_reply(content: str, history: list = None) -> str:
@@ -673,7 +739,7 @@ class ChatService:
         - event: token, data: {content: "xxx"}
         - event: tool_call, data: {tool: "xxx", args: {...}}
         - event: done, data: {tokens_used, latency_ms, message_id, tool_calls, tool_result}
-        - event: error, data: {message: "xxx"}
+        - event: error, data: {content: "xxx"}
         """
         from app.database.session import SessionLocal
 
@@ -730,7 +796,7 @@ class ChatService:
             history = [{"role": m.role, "content": m.content} for m in reversed(history_messages)]
 
             # 发送 thinking 事件（保留 start 向后兼容）
-            start_data = {'session_id': session.id, 'message_id': user_msg.id}
+            start_data = {'session_id': session.id, 'message_id': user_msg.id, 'content': '正在分析问题...'}
             yield f"event: thinking\ndata: {json.dumps(start_data, ensure_ascii=False)}\n\n"
             yield f"event: start\ndata: {json.dumps(start_data, ensure_ascii=False)}\n\n"
 
@@ -769,23 +835,30 @@ class ChatService:
                             )
 
                             # 发送工具开始事件
-                            tool_start_data = {'tool': tool_name, 'args': tool_args}
+                            tool_start_data = {'tool': tool_name, 'input': tool_args}
                             yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
                             yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
 
                             try:
                                 tool_result = self._invoke_tool_stub(tool_name, tool_args)
+                                json.loads(tool_result)  # 校验返回是否为有效 JSON
+                            except json.JSONDecodeError:
+                                logger.warning("SSE Stub 图片检测工具返回非 JSON 结果: %s", tool_result)
+                                tool_result = json.dumps({"error": f"工具返回了非 JSON 结果：{tool_result}"}, ensure_ascii=False)
                             except Exception as e:
                                 logger.exception("SSE Stub 图片检测工具调用失败: %s", e)
-                                tool_result = f"工具调用失败：{str(e)}"
+                                tool_result = json.dumps({"error": f"检测失败：{str(e)}"}, ensure_ascii=False)
 
-                            # 发送工具结束事件
-                            tool_end_data = {'tool': tool_name, 'result': str(tool_result)[:500]}
+                            # 发送工具结束事件（含完整结果，供前端解析标注图）
+                            tool_end_data = {'tool': tool_name, 'result': tool_result}
                             yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
 
-                            # 发送工具结果事件
-                            nl = "\n\n"
-                            result_content = nl + tool_result
+                            # 发送专用工具结果事件，前端可据此渲染 DetectionResultCard
+                            yield f"event: tool_result\ndata: {json.dumps({'tool': tool_name, 'result': tool_result}, ensure_ascii=False)}\n\n"
+
+                            # 发送文字摘要到聊天正文
+                            display_text = self._extract_tool_result_summary(tool_name, tool_result)
+                            result_content = "\n\n" + display_text
                             yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
                             yield f"event: token\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
 
@@ -803,10 +876,13 @@ class ChatService:
                     if matched_tool:
                         tool_name = matched_tool["name"]
                         tool_args = self._extract_tool_args_from_stub(normalized, tool_name)
+                        # 回退：如果 search_knowledge 没有提取到 query，使用用户消息内容
+                        if tool_name == "search_knowledge" and "query" not in tool_args:
+                            tool_args["query"] = normalized
                         tool_calls = [{"tool": tool_name, "args": tool_args}]
 
                         # 发送工具开始事件（tool_start 新事件名，保留 tool_call 向后兼容）
-                        tool_start_data = {'tool': tool_name, 'args': tool_args}
+                        tool_start_data = {'tool': tool_name, 'input': tool_args}
                         yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
                         yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
 
@@ -814,15 +890,15 @@ class ChatService:
                             tool_result = self._invoke_tool_stub(tool_name, tool_args)
                         except Exception as e:
                             logger.exception("SSE Stub 工具调用失败: tool=%s", tool_name)
-                            tool_result = f"工具调用失败：{str(e)}"
+                            tool_result = json.dumps({"error": f"工具调用失败：{str(e)}"}, ensure_ascii=False)
 
                         # 发送工具结束事件（tool_end 新事件名）
                         tool_end_data = {'tool': tool_name, 'result': str(tool_result)[:500]}
                         yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
 
                         # 发送工具结果事件（text_chunk 新事件名，保留 token 向后兼容）
-                        nl = "\n\n"
-                        result_content = nl + tool_result
+                        display_text = self._extract_tool_result_summary(tool_name, tool_result)
+                        result_content = "\n\n" + display_text
                         yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
                         yield f"event: token\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
 
@@ -849,6 +925,52 @@ class ChatService:
                     tool_calls = []
                     tool_result = ""
 
+                    # 若用户上传了图片，先直接调用检测工具，避免把 base64 标注图
+                    # 送入 LLM 上下文导致 token 超限；只把文字摘要交给 Agent。
+                    if data.files and self._has_image_file(data.files):
+                        first_image_url = self._extract_first_image_url(data.files)
+                        if first_image_url:
+                            tool_name = "detect_single_image"
+                            tool_args = {"image_path": first_image_url, "conf": 0.25, "iou": 0.45}
+                            tool_calls.append({"tool": tool_name, "args": tool_args})
+
+                            tool_start_data = {"tool": tool_name, "input": tool_args}
+                            yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+                            yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+
+                            try:
+                                from app.agent.tools.detection_tool import detect_single_image
+                                loop = asyncio.get_event_loop()
+                                tool_result = await loop.run_in_executor(
+                                    None,
+                                    lambda: detect_single_image.invoke(tool_args),
+                                )
+                                json.loads(tool_result)  # 校验返回是否为有效 JSON
+                            except json.JSONDecodeError:
+                                logger.warning("真实模式图片检测工具返回非 JSON 结果: %s", tool_result)
+                                tool_result = json.dumps({"error": f"工具返回了非 JSON 结果：{tool_result}"}, ensure_ascii=False)
+                            except Exception as e:
+                                logger.exception("真实模式图片预处理检测失败")
+                                tool_result = json.dumps({"error": f"检测失败：{str(e)}"}, ensure_ascii=False)
+
+                            # 发送完整工具结果，前端可解析标注图
+                            tool_end_data = {"tool": tool_name, "result": tool_result}
+                            yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+                            yield f"event: tool_result\ndata: {json.dumps({'tool': tool_name, 'result': tool_result}, ensure_ascii=False)}\n\n"
+
+                            # 在聊天正文显示文字摘要
+                            display_text = self._extract_tool_result_summary(tool_name, tool_result)
+                            result_content = "\n\n" + display_text
+                            yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
+                            yield f"event: token\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
+
+                            # 只把摘要注入 Agent 提示词，避免 base64 撑爆上下文
+                            agent_content = (
+                                f"{agent_content}\n\n【系统提示】已对用户上传的图片完成火灾烟雾检测，"
+                                f"检测结果摘要如下（请不要再次调用检测工具）：\n{display_text}\n"
+                                f"请直接基于以上结果回复用户。"
+                            )
+
                     async for event in detection_agent.chat_stream(agent_content, history):
                         event_type = event.get("type", "")
 
@@ -862,7 +984,7 @@ class ChatService:
                             tool_name = event.get("tool", "")
                             tool_input = event.get("input", {})
                             tool_calls.append({"tool": tool_name, "args": tool_input})
-                            tool_start_data = {'tool': tool_name, 'args': tool_input}
+                            tool_start_data = {'tool': tool_name, 'input': tool_input}
                             yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
                             yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
 
@@ -871,23 +993,26 @@ class ChatService:
                             tool_name = event.get("tool", "")
                             if tool_output:
                                 tool_result += str(tool_output) + "\n"
-                                tool_end_data = {'tool': tool_name, 'result': str(tool_output)[:500]}
+                                # 发送完整工具结果，前端可解析标注图
+                                tool_end_data = {'tool': tool_name, 'result': tool_output}
                                 yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+                                yield f"event: tool_result\ndata: {json.dumps({'tool': tool_name, 'result': tool_output}, ensure_ascii=False)}\n\n"
 
                         elif event_type == "error":
-                            error_content = event.get("content", "")
-                            yield f"event: error\ndata: {json.dumps({'message': error_content}, ensure_ascii=False)}\n\n"
+                            error_content = event.get("content", "") or event.get("message", "")
+                            if not error_content:
+                                error_content = "AI 服务暂时不可用，请稍后重试。"
+                            yield f"event: error\ndata: {json.dumps({'content': error_content}, ensure_ascii=False)}\n\n"
 
                     if not full_content:
                         full_content = "抱歉，无法处理您的请求。"
 
                 except Exception as e:
                     logger.exception("SSE Agent 执行失败")
-                    full_content = f"AI 服务暂时不可用，请稍后重试。"
+                    full_content = f"AI 服务暂时不可用，请稍后重试。（错误：{str(e)}）"
                     tool_calls = []
                     tool_result = ""
-                    yield f"event: text_chunk\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
-                    yield f"event: token\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
+                    yield f"event: error\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
 
             latency_ms = int((time.time() - start_time) * 1000)
             tokens_used = max(1, (len(data.content) + len(full_content)) // 2)
@@ -921,13 +1046,14 @@ class ChatService:
                 "message_id": assistant_msg.id,
                 "tool_calls": tool_calls if tool_calls else [],
                 "tool_result": tool_result if tool_result else "",
+                "response": assistant_msg.content or "",
             }
             yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
 
         except Exception as e:
             db.rollback()
             logger.error("SSE流式输出错误: %s", e)
-            yield f"event: error\ndata: {json.dumps({'message': 'AI服务暂时不可用，请稍后重试'}, ensure_ascii=False)}\n\n"
+            yield f"event: error\ndata: {json.dumps({'content': 'AI服务暂时不可用，请稍后重试'}, ensure_ascii=False)}\n\n"
         finally:
             db.close()
 

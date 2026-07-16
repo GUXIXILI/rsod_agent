@@ -6,6 +6,7 @@
 - 批量检测：多张图片循环检测
 - 视频检测：逐帧检测，支持跳帧
 """
+import base64
 import io
 import json
 import os
@@ -18,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image
 from sqlalchemy.orm import Session
 
@@ -31,11 +33,27 @@ logger = get_logger(__name__)
 
 
 class DetectionService:
-    """火灾烟雾检测服务，封装 YOLOv11 模型推理全流程"""
+    """
+    火灾烟雾检测服务，封装 YOLOv11 模型推理全流程。
+
+    提供四种检测模式：
+    - detect_single: 单图检测，完整流程（上传→推理→标注→入库→火情判定→预警）
+    - detect_batch: 批量图片检测，使用线程池并发处理
+    - detect_video: 视频文件检测，逐帧推理，支持跳帧
+    - detect_zip: ZIP 压缩包批量检测，自动解压逐张处理
+    - detect_frame: 纯推理方法，用于 WebSocket 摄像头实时检测（无 DB/MinIO 操作）
+
+    模型缓存：使用 LRU 缓存策略（最大 MAX_CACHE_SIZE 个），避免重复加载模型。
+    """
 
     MAX_CACHE_SIZE = 4
 
     def __init__(self):
+        """
+        初始化检测服务。
+
+        创建 LRU 模型缓存和线程锁，用于不同场景的模型复用。
+        """
         self._model_cache: OrderedDict[int, Any] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -50,30 +68,71 @@ class DetectionService:
         iou_threshold: float = 0.45,
         image_size: int = 640,
     ) -> DetectionTask:
-        """单图检测完整流程"""
+        """
+        单图检测完整流程。
+
+        流程：
+        1. 上传原图到 MinIO（非致命：上传失败不影响检测）
+        2. 加载场景默认模型（LRU 缓存）
+        3. 执行 YOLO 推理（PIL Image 必须转为 RGB 避免 RGBA 四通道 bug）
+        4. 绘制检测框并上传标注图到 MinIO（非致命）
+        5. 创建 DetectionTask 记录
+        6. 为每个检测目标创建 DetectionResult
+        7. 火情等级判定（调用 fire_level_service）
+        8. 生成火灾预警（调用 alert_service）
+
+        Args:
+            db: 数据库会话
+            user_id: 用户 ID
+            scene_id: 场景 ID
+            image_file: 图片文件字节数据
+            filename: 原始文件名
+            conf_threshold: 置信度阈值（默认 0.25）
+            iou_threshold: NMS IoU 阈值（默认 0.45）
+            image_size: 推理图像尺寸（默认 640）
+
+        Returns:
+            DetectionTask: 包含检测结果的任务对象
+        """
         minio_client = MinIOClient()
         ext = filename.rsplit(".", 1)[-1] if "." in filename else "jpg"
         object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/{filename}"
         original_url = None
+        # 1. 上传原图到 MinIO（非致命：上传失败不影响检测）
         try:
-            # 1. 上传原图到 MinIO
             original_url = minio_client.upload_bytes(image_file, object_name, f"image/{ext}")
+        except Exception as upload_err:
+            logger.warning("MinIO 原图上传失败，跳过存储继续检测: %s", upload_err)
 
+        try:
             # 2. 加载场景默认模型
             model = self._load_model(db, scene_id)
 
-            # 3. 执行推理
-            image = Image.open(io.BytesIO(image_file))
-            image_np = np.array(image)
-            results = model(image_np, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
+            # 3. 执行推理（强制转为 RGB 避免 RGBA 四通道导致模型报错）
+            # 注意：必须传 PIL Image 而非 numpy 数组，因为 YOLO 对 PIL Image 和 numpy
+            # 数组的预处理路径不同，numpy 数组会导致检测结果全部为 0（P0 级 bug）
+            image = Image.open(io.BytesIO(image_file)).convert("RGB")
+            t_start = datetime.now()
+            results = model(image, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
+            # 记录推理耗时（优先使用 YOLO speed 指标，兜底用 wall-clock 时间）
+            inference_time = (
+                results[0].speed.get("inference", 0) if hasattr(results[0], "speed") and results[0].speed
+                else (datetime.now() - t_start).total_seconds() * 1000
+            )
 
-            # 4. 绘制检测框并上传标注图
+            # 4. 绘制检测框并上传标注图（非致命：上传失败不影响检测）
             annotated_image = results[0].plot()
             annotated_bytes = cv2.imencode(f".{ext}", annotated_image)[1].tobytes()
             annotated_object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/annotated_{filename}"
-            annotated_url = minio_client.upload_bytes(annotated_bytes, annotated_object_name, f"image/{ext}")
+            annotated_url = None
+            try:
+                annotated_url = minio_client.upload_bytes(annotated_bytes, annotated_object_name, f"image/{ext}")
+            except Exception as upload_err:
+                logger.warning("MinIO 标注图上传失败，跳过存储: %s", upload_err)
 
             # 5. 创建 DetectionTask 记录
+            # 同时把标注图以 base64 形式附在对象上，供上层（如对话工具）在 MinIO
+            # 上传失败时直接嵌入到回复中，避免丢失可视化结果。
             task = DetectionTask(
                 user_id=user_id,
                 scene_id=scene_id,
@@ -85,7 +144,9 @@ class DetectionService:
                 image_width=image.width,
                 image_height=image.height,
                 detected_at=datetime.now(),
+                total_inference_time=inference_time,
             )
+            task.annotated_image_base64 = base64.b64encode(annotated_bytes).decode("utf-8")
             db.add(task)
             db.flush()
 
@@ -206,7 +267,23 @@ class DetectionService:
         filenames: List[str],
         **kwargs,
     ) -> List[DetectionTask]:
-        """批量检测：使用线程池并发处理多张图片"""
+        """
+        批量检测：使用线程池并发处理多张图片。
+
+        每张图片在独立线程中执行 detect_single，使用独立的数据库会话，
+        避免跨线程共享导致的连接问题。单个图片检测失败不会影响其他图片。
+
+        Args:
+            db: 数据库会话（仅用于传递参数，子线程中使用独立会话）
+            user_id: 用户 ID
+            scene_id: 场景 ID
+            image_files: 图片字节数据列表
+            filenames: 文件名列表（与 image_files 一一对应）
+            **kwargs: 传递给 detect_single 的额外参数
+
+        Returns:
+            List[DetectionTask]: 成功检测的任务列表
+        """
         tasks: List[DetectionTask] = []
 
         def _detect_one(img_bytes: bytes, fname: str) -> Optional[DetectionTask]:
@@ -555,9 +632,25 @@ class DetectionService:
         image_size: int = 640,
         device: str = "cpu",
     ) -> dict:
-        """纯推理方法，用于WebSocket摄像头实时检测。无DB/MinIO操作。"""
-        import base64
+        """
+        纯推理方法，用于 WebSocket 摄像头实时检测。
 
+        与 detect_single 不同，此方法不涉及数据库和 MinIO 操作，
+        仅执行：解码 JPEG 帧 → 模型推理 → 绘制标注 → 编码 base64 返回。
+
+        适用于高频调用场景（每秒 15-30 帧），避免数据库写入成为瓶颈。
+
+        Args:
+            frame_bytes: JPEG 编码的帧字节数据
+            scene_id: 场景 ID（用于 LRU 缓存查找，默认 1）
+            conf: 置信度阈值（默认 0.25）
+            iou: NMS IoU 阈值（默认 0.45）
+            image_size: 推理图像尺寸（默认 640）
+            device: 推理设备（"cpu" 或 "0"，默认 "cpu"）
+
+        Returns:
+            dict: 包含标注帧 base64、检测列表、目标数量、火情等级的字典
+        """
         # 1. 解码JPEG帧
         nparr = np.frombuffer(frame_bytes, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -641,6 +734,9 @@ class DetectionService:
             )
 
         with self._lock:
+            # 确保模型使用确定性推理，避免 CPU 浮点非确定性导致结果随机波动
+            torch.use_deterministic_algorithms(True, warn_only=True)
+
             # 加锁后再次检查，避免并发重复加载
             if scene_id in self._model_cache:
                 self._model_cache.move_to_end(scene_id)

@@ -1,16 +1,37 @@
 """
 MinIO 对象存储客户端封装
-用于存储检测图像、训练模型等文件
+
+用于存储检测图像、标注图像、训练模型等文件。
+提供字节流上传、本地文件上传、预签名 URL 生成、文件删除等功能。
+
+特性：
+- 连接超时保护：HTTP 客户端超时 5 秒，避免 MinIO 不可用时阻塞启动
+- 自动创建桶：初始化时自动确保配置的存储桶存在
+- 预签名 URL：上传后自动生成 7 天有效期预签名 URL
 """
 import io
 from datetime import timedelta
 from minio import Minio
 from minio.error import S3Error
 from app.config.settings import settings
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class MinIOClient:
-    """MinIO 客户端封装"""
+    """
+    MinIO 客户端封装
+
+    封装 MinIO Python SDK 的常用操作：
+    - upload_bytes: 上传字节数据（支持 base64 自动解码）
+    - upload_file: 上传本地文件
+    - get_presigned_url: 获取预签名访问 URL（7 天有效期）
+    - get_file_stream: 获取文件流式响应（用于代理下载）
+    - delete_file: 删除指定文件
+
+    使用自定义 HTTP 客户端设置超时参数，避免连接阻塞。
+    """
 
     def __init__(self):
         import urllib3
@@ -32,7 +53,7 @@ class MinIOClient:
             if not self.client.bucket_exists(self.bucket_name):
                 self.client.make_bucket(self.bucket_name)
         except S3Error as e:
-            print(f"MinIO bucket 初始化警告: {e}")
+            logger.warning(f"MinIO bucket 初始化警告: {e}")
 
     def upload_file(self, object_name: str, file_path: str) -> str:
         """

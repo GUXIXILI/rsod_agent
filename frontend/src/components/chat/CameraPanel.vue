@@ -73,6 +73,11 @@ const TARGET_FRAME_INTERVAL = 100 // 10 FPS
 let configTimeout = null
 
 // ── 启动摄像头 ──
+
+/**
+ * 启动摄像头并建立 WebSocket 检测连接
+ * 请求浏览器摄像头权限（320x240），播放视频流后建立 WebSocket 连接
+ */
 async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -101,6 +106,12 @@ async function startCamera() {
 }
 
 // ── WebSocket 连接 ──
+
+/**
+ * 建立 WebSocket 连接
+ * 发送 config 配置消息，设置 5 秒超时重试机制（最多重试 3 次）
+ * 接收 config_ok 后开始循环发送帧，接收 result 后渲染标注帧
+ */
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
@@ -163,6 +174,12 @@ function connectWebSocket() {
 }
 
 // ── 发送帧 ──
+
+/**
+ * 帧发送循环（基于 requestAnimationFrame）
+ * 控制帧率 10 FPS（100ms 间隔），从 video 捕获帧并压缩为 JPEG 发送
+ * @param {number} timestamp - requestAnimationFrame 回调的时间戳
+ */
 function sendFrameLoop(timestamp) {
   if (!ws || ws.readyState !== WebSocket.OPEN || !videoRef.value) {
     rafId = requestAnimationFrame(sendFrameLoop)
@@ -184,6 +201,12 @@ function sendFrameLoop(timestamp) {
 }
 
 // ── 处理检测结果 ──
+
+/**
+ * 处理 WebSocket 返回的检测结果
+ * 更新实时统计、渲染标注帧、触发火情预警和检测结果通知
+ * @param {Object} data - 检测结果数据 { annotated_frame, detections, fire_level, inference_time, total_objects }
+ */
 function handleResult(data) {
   inferenceTime.value = data.inference_time || 0
   objectCount.value = data.total_objects || 0
@@ -227,6 +250,11 @@ function handleResult(data) {
 }
 
 // ── FPS 计数器 ──
+
+/**
+ * 启动 FPS 计数器
+ * 每秒统计已发送帧数，更新 FPS 显示
+ */
 function startFPSCounter() {
   fpsTimer = setInterval(() => {
     fps.value = fpsCounter
@@ -235,11 +263,20 @@ function startFPSCounter() {
 }
 
 // ── 关闭 ──
+
+/**
+ * 关闭摄像头面板
+ * 调用 cleanup 释放所有资源，触发 close 事件通知父组件
+ */
 function handleClose() {
   cleanup()
   emit('close')
 }
 
+/**
+ * 清理所有资源
+ * 停止超时计时器、帧发送循环、FPS 计数器，关闭 WebSocket 连接，释放摄像头
+ */
 function cleanup() {
   // 停止超时计时器
   if (configTimeout) {

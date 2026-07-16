@@ -131,15 +131,26 @@ const canSend = computed(() => {
   return text.value.trim() || files.value.length > 0
 })
 
+/**
+ * 触发文件选择器
+ */
 function triggerFileInput() {
   fileInputRef.value?.click()
 }
 
+/**
+ * 处理文件选择器 change 事件
+ * @param {Event} event - 文件选择事件
+ */
 function handleFileSelect(event) {
   addFiles(Array.from(event.target.files))
   event.target.value = ''
 }
 
+/**
+ * 处理拖拽释放事件
+ * @param {DragEvent} event - 拖拽事件
+ */
 function handleDrop(event) {
   isDragging.value = false
   const droppedFiles = Array.from(event.dataTransfer.files)
@@ -148,6 +159,11 @@ function handleDrop(event) {
   }
 }
 
+/**
+ * 添加文件到文件列表
+ * 图片文件自动生成 ObjectURL 预览
+ * @param {File[]} newFiles - 新文件数组
+ */
 function addFiles(newFiles) {
   newFiles.forEach((f) => {
     if (f.type?.startsWith('image/')) {
@@ -157,6 +173,11 @@ function addFiles(newFiles) {
   })
 }
 
+/**
+ * 移除指定索引的文件
+ * 释放图片文件的 ObjectURL 内存
+ * @param {number} idx - 文件索引
+ */
 function removeFile(idx) {
   const file = files.value[idx]
   if (file._preview) {
@@ -165,6 +186,10 @@ function removeFile(idx) {
   files.value.splice(idx, 1)
 }
 
+/**
+ * 自动调整 textarea 高度
+ * 根据内容自适应高度，最大 150px
+ */
 function autoResize() {
   nextTick(() => {
     const el = textareaRef.value
@@ -175,6 +200,11 @@ function autoResize() {
   })
 }
 
+/**
+ * 处理键盘回车事件
+ * Enter 直接发送，Shift+Enter 换行
+ * @param {KeyboardEvent} event - 键盘事件
+ */
 function handleEnter(event) {
   // Shift+Enter 换行，Enter 发送
   if (!event.shiftKey) {
@@ -183,6 +213,11 @@ function handleEnter(event) {
   }
 }
 
+/**
+ * 处理粘贴事件
+ * 支持 Ctrl+V 粘贴图片，自动将剪贴板中的图片添加到文件列表
+ * @param {ClipboardEvent} event - 粘贴事件
+ */
 function handlePaste(event) {
   const items = event.clipboardData?.items
   if (!items) return
@@ -202,6 +237,11 @@ function handlePaste(event) {
   }
 }
 
+/**
+ * 发送消息
+ * 触发父组件的 send 事件，传递文字内容和文件列表，
+ * 发送后清空输入区域和文件列表
+ */
 function handleSend() {
   if (!canSend.value) return
   emit('send', {

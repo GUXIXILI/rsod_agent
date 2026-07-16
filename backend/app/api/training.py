@@ -283,7 +283,7 @@ def stop_training(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
         )
 
-    return {"message": "训练已停止"}
+    return {"code": 200, "message": "训练已停止", "data": None}
 
 
 @router.delete("/{task_uuid}")
@@ -456,13 +456,16 @@ def export_model(
         )
 
     return {
+        "code": 200,
         "message": "模型导出成功",
-        "task_uuid": task_uuid,
-        "format": result["format"],
-        "file_name": result["file_name"],
-        "file_size": result["file_size"],
-        "model_path": result["file_path"],
-        "download_url": result["download_url"],
+        "data": {
+            "task_uuid": task_uuid,
+            "format": result["format"],
+            "file_name": result["file_name"],
+            "file_size": result["file_size"],
+            "model_path": result["file_path"],
+            "download_url": result["download_url"],
+        },
     }
 
 
@@ -554,19 +557,23 @@ async def predict_with_model(
     annotated_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     return {
-        "task_id": task.id,
-        "task_uuid": task.task_uuid,
-        "total_objects": len(result.detections),
-        "inference_time": round(result.inference_time_ms, 2),
-        "annotated_image": annotated_b64,
-        "detections": [
-            {
-                "class_name": det.class_name,
-                "confidence": round(det.confidence, 4),
-                "bbox": det.bbox,
-            }
-            for det in result.detections
-        ],
+        "code": 200,
+        "message": "success",
+        "data": {
+            "task_id": task.id,
+            "task_uuid": task.task_uuid,
+            "total_objects": len(result.detections),
+            "inference_time": round(result.inference_time_ms, 2),
+            "annotated_image": annotated_b64,
+            "detections": [
+                {
+                    "class_name": det.class_name,
+                    "confidence": round(det.confidence, 4),
+                    "bbox": det.bbox,
+                }
+                for det in result.detections
+            ],
+        },
     }
 
 

@@ -78,6 +78,17 @@
 </template>
 
 <script setup>
+/**
+ * LoginPage.vue — 用户登录页面
+ *
+ * 功能说明：
+ *   - 全屏居中登录卡片，渐变色背景
+ *   - 支持用户名或邮箱登录
+ *   - 表单验证（用户名/密码必填、密码长度 ≥ 6）
+ *   - 登录成功后跳转 redirect 参数指定页面或默认 /chat
+ *   - 账号或密码错误时不区分具体错误类型，保护隐私
+ *   - 底部提供忘记密码和注册链接
+ */
 import { ref, reactive } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'

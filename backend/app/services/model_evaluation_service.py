@@ -1,4 +1,15 @@
-"""火灾烟雾模型评估服务。"""
+"""
+火灾烟雾模型评估服务
+
+使用验证集对训练好的 YOLO 模型进行定量评估，计算 mAP、Precision、Recall
+等指标，并将评估结果持久化到数据库。
+
+评估流程：
+1. 加载模型权重
+2. 对验证集执行 val() 模式推理
+3. 提取并汇总评估指标
+4. 将结果写入 ModelVersion 的 eval_metrics 字段
+"""
 
 from collections.abc import Mapping, Sequence
 import hashlib
@@ -9,19 +20,16 @@ from pathlib import Path
 from ultralytics import YOLO
 from app.entity.db_models import ModelVersion
 
-from collections.abc import Mapping, Sequence
-import math
-
-
+# 预期类别映射：与训练时一致，用于校验模型类别
 EXPECTED_CLASS_MAPPING = {0: "fire", 1: "smoke"}
 
 
 class ModelEvaluationError(ValueError):
-    """模型评估结果无效。"""
+    """模型评估异常：评估结果无效时抛出"""
 
 
 def _normalize_class_names(names) -> dict[int, str]:
-    """将Ultralytics类别名称统一转换为字典并校验类别顺序。"""
+    """将 YOLO 模型的类别名称统一转换为 {int: str} 映射，并校验类别顺序"""
     if isinstance(names, Mapping):
         try:
             normalized = {int(class_id): str(name) for class_id, name in names.items()}

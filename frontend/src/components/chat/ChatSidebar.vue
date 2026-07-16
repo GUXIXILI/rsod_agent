@@ -74,11 +74,9 @@
  *   - 空状态引导
  */
 import { ChatDotRound, Delete, EditPen, Expand, Fold, MoreFilled, Plus } from '@element-plus/icons-vue'
-import { useAgentStore } from '@/stores/agent'
 import { ElMessageBox } from 'element-plus'
 import { ref } from 'vue'
 
-const agentStore = useAgentStore()
 const collapsed = ref(false)
 
 const props = defineProps({
@@ -88,14 +86,25 @@ const props = defineProps({
 
 const emit = defineEmits(['new-chat', 'switch-session', 'delete-session', 'rename-session'])
 
+/**
+ * 触发新建对话事件
+ */
 function handleNewChat() {
   emit('new-chat')
 }
 
+/**
+ * 切换到指定会话
+ * @param {number} sessionId - 会话 ID
+ */
 function handleSwitch(sessionId) {
   emit('switch-session', sessionId)
 }
 
+/**
+ * 删除指定会话（带确认弹窗）
+ * @param {number} sessionId - 会话 ID
+ */
 function handleDelete(sessionId) {
   ElMessageBox.confirm('确定要删除这个会话吗？删除后不可恢复。', '删除确认', {
     confirmButtonText: '删除',
@@ -106,6 +115,13 @@ function handleDelete(sessionId) {
   }).catch(() => {})
 }
 
+/**
+ * 处理下拉菜单命令
+ * rename：弹出重命名输入框
+ * delete：弹出删除确认框
+ * @param {string} command - 菜单命令（'rename' | 'delete'）
+ * @param {Object} session - 会话对象
+ */
 function handleMenuCommand(command, session) {
   if (command === 'rename') {
     ElMessageBox.prompt('请输入新的会话名称', '重命名', {
@@ -121,6 +137,12 @@ function handleMenuCommand(command, session) {
   }
 }
 
+/**
+ * 格式化时间戳为友好的相对时间或日期
+ * 规则：< 1 分钟 → "刚刚"，< 1 小时 → "X分钟前"，< 1 天 → "X小时前"，否则显示日期
+ * @param {string|number} timestamp - 时间戳
+ * @returns {string} 格式化后的时间文本
+ */
 function formatTime(timestamp) {
   if (!timestamp) return ''
   const d = new Date(timestamp)

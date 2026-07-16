@@ -2,6 +2,10 @@
 对话服务单元测试
 覆盖会话创建、消息发送存储、会话列表分页、会话删除（含消息级联）
 """
+import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import pytest
 from fastapi import HTTPException
 
@@ -161,3 +165,186 @@ class TestChatDeleteSession:
         with pytest.raises(HTTPException) as exc_info:
             chat_service.delete_session(db_session, session.id, create_test_user.id)
         assert exc_info.value.status_code == 404
+
+
+class TestChatServiceHelpers:
+    """chat_service 静态辅助方法测试"""
+
+    def test_extract_tool_result_summary_from_detection_json(self):
+        """从检测工具 JSON 中提取 summary，避免把 base64 送入聊天正文"""
+        tool_result = '{"summary": "检测到 2 个目标", "annotated_image_base64": "aGVsbG8="}'
+        summary = ChatService._extract_tool_result_summary("detect_single_image", tool_result)
+        assert summary == "检测到 2 个目标"
+        assert "base64" not in summary
+
+    def test_extract_tool_result_summary_fallback(self):
+        """非 JSON 结果时原样返回"""
+        tool_result = "plain text result"
+        summary = ChatService._extract_tool_result_summary("detect_single_image", tool_result)
+        assert summary == "plain text result"
+
+    def test_has_image_file_detects_image_type(self):
+        """_has_image_file 正确识别图片文件"""
+        files = [{"url": "http://minio/test.jpg", "type": "image", "name": "test.jpg"}]
+        assert ChatService._has_image_file(files) is True
+
+    def test_has_image_file_defensive_data_wrapper(self):
+        """_has_image_file 兼容前端未解包的 {code, data: {...}} 结构"""
+        files = [{"code": 200, "data": {"url": "http://minio/test.jpg", "type": "image", "name": "test.jpg"}}]
+        assert ChatService._has_image_file(files) is True
+
+    def test_extract_first_image_url_normal(self):
+        """_extract_first_image_url 正常提取图片 URL"""
+        files = [
+            {"url": "http://minio/video.mp4", "type": "video", "name": "video.mp4"},
+            {"url": "http://minio/test.jpg", "type": "image", "name": "test.jpg"},
+        ]
+        assert ChatService._extract_first_image_url(files) == "http://minio/test.jpg"
+
+    def test_extract_first_image_url_defensive_data_wrapper(self):
+        """_extract_first_image_url 兼容未解包的 data 包装"""
+        files = [{"code": 200, "data": {"url": "http://minio/test.jpg", "type": "image", "name": "test.jpg"}}]
+        assert ChatService._extract_first_image_url(files) == "http://minio/test.jpg"
+
+
+class TestChatSendMessageStream:
+    """chat_service.send_message_stream 流式事件测试"""
+
+    @staticmethod
+    def _parse_sse_events(events):
+        """将 SSE 原始事件流解析为 (event_type, payload) 列表"""
+        parsed = []
+        for raw in events:
+            event_type = None
+            data_line = None
+            for line in raw.splitlines():
+                if line.startswith("event:"):
+                    event_type = line[len("event:"):].strip()
+                elif line.startswith("data:"):
+                    data_line = line[len("data:"):].strip()
+            if event_type and data_line:
+                parsed.append((event_type, json.loads(data_line)))
+        return parsed
+
+    @pytest.mark.asyncio
+    async def test_send_message_stream_emits_tool_result_with_base64(self):
+        """上传图片时，SSE 流应发送包含 base64 标注图的 tool_result 事件"""
+        tool_result = {
+            "summary": "检测到 1 个火源",
+            "annotated_image_base64": "aGVsbG8=",
+            "fire_object_count": 1,
+            "smoke_object_count": 0,
+            "detections": [
+                {"class_name": "fire", "confidence": 0.9, "bbox": [0, 0, 10, 10]}
+            ],
+        }
+
+        mock_session = MagicMock(spec=ChatSession)
+        mock_session.id = 1
+        mock_session.message_count = 0
+        mock_session.last_message_at = None
+
+        mock_db = MagicMock()
+        mock_db.query.return_value = mock_db
+        mock_db.filter.return_value = mock_db
+        mock_db.order_by.return_value = mock_db
+        mock_db.limit.return_value = mock_db
+        mock_db.all.return_value = []
+
+        with patch("app.services.chat_service.settings.LLM_STUB_MODE", True), \
+             patch("app.database.session.SessionLocal", return_value=mock_db), \
+             patch("app.agent.tools.detection_tool.detect_single_image") as mock_detect, \
+             patch.object(chat_service, "create_session", return_value=mock_session):
+            mock_detect.invoke.return_value = json.dumps(tool_result, ensure_ascii=False)
+
+            data = SimpleNamespace(
+                content="检测这张图片",
+                files=[{"url": "http://minio/test.jpg", "type": "image", "name": "test.jpg"}],
+            )
+
+            events = []
+            async for raw in chat_service.send_message_stream(
+                user_id=1, data=data, session_id=None
+            ):
+                events.append(raw)
+
+        parsed_events = self._parse_sse_events(events)
+
+        tool_result_events = [
+            payload for etype, payload in parsed_events if etype == "tool_result"
+        ]
+        assert len(tool_result_events) >= 1
+        for payload in tool_result_events:
+            result = json.loads(payload["result"])
+            assert "annotated_image_base64" in result
+            assert result["annotated_image_base64"] == "aGVsbG8="
+
+        tool_end_events = [
+            payload for etype, payload in parsed_events if etype == "tool_end"
+        ]
+        assert len(tool_end_events) >= 1
+        for payload in tool_end_events:
+            result = json.loads(payload["result"])
+            assert "annotated_image_base64" in result
+
+        event_types = [etype for etype, _ in parsed_events]
+        assert "done" in event_types
+
+    @pytest.mark.asyncio
+    async def test_send_message_stream_handles_detection_error_json(self):
+        """检测工具返回 error JSON 时，SSE 不崩溃且 error 内容被传递"""
+        error_tool_result = {
+            "error": "无法下载图片 'http://minio/test.jpg'，请确认 URL 是否可访问。（Connection timeout）"
+        }
+
+        mock_session = MagicMock(spec=ChatSession)
+        mock_session.id = 2
+        mock_session.message_count = 0
+        mock_session.last_message_at = None
+
+        mock_db = MagicMock()
+        mock_db.query.return_value = mock_db
+        mock_db.filter.return_value = mock_db
+        mock_db.order_by.return_value = mock_db
+        mock_db.limit.return_value = mock_db
+        mock_db.all.return_value = []
+
+        with patch("app.services.chat_service.settings.LLM_STUB_MODE", True), \
+             patch("app.database.session.SessionLocal", return_value=mock_db), \
+             patch("app.agent.tools.detection_tool.detect_single_image") as mock_detect, \
+             patch.object(chat_service, "create_session", return_value=mock_session):
+            mock_detect.invoke.return_value = json.dumps(error_tool_result, ensure_ascii=False)
+
+            data = SimpleNamespace(
+                content="检测这张图片",
+                files=[{"url": "http://minio/test.jpg", "type": "image", "name": "test.jpg"}],
+            )
+
+            events = []
+            async for raw in chat_service.send_message_stream(
+                user_id=1, data=data, session_id=None
+            ):
+                events.append(raw)
+
+        parsed_events = self._parse_sse_events(events)
+
+        tool_result_events = [
+            payload for etype, payload in parsed_events if etype == "tool_result"
+        ]
+        assert len(tool_result_events) >= 1
+        for payload in tool_result_events:
+            result = json.loads(payload["result"])
+            assert "error" in result
+            assert "无法下载图片" in result["error"]
+
+        tool_end_events = [
+            payload for etype, payload in parsed_events if etype == "tool_end"
+        ]
+        assert len(tool_end_events) >= 1
+        for payload in tool_end_events:
+            result = json.loads(payload["result"])
+            assert "error" in result
+
+        event_types = [etype for etype, _ in parsed_events]
+        assert "done" in event_types
+        assert "error" not in event_types

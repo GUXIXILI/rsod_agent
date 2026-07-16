@@ -2,8 +2,6 @@
 角色权限服务
 处理 RBAC 角色/权限的 CRUD 业务逻辑
 """
-from typing import Optional
-
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 

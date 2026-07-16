@@ -57,8 +57,8 @@ export async function detectZip(formData, sceneId = 1) {
  * @param {number} taskId - 检测任务 ID
  * @returns {Promise} - 任务状态和结果
  */
-export function getDetectionStatus(taskId) {
-  return request.get(`/detection/tasks/${taskId}`);
+export async function getDetectionStatus(taskId) {
+  return (await request.get(`/detection/tasks/${taskId}`)).data;
 }
 
 /**
@@ -67,13 +67,13 @@ export function getDetectionStatus(taskId) {
  * @param {number} [sceneId=1] - 场景 ID（默认 1）
  * @returns {Promise} - { task_id, status, message }
  */
-export function detectVideo(formData, sceneId = 1) {
+export async function detectVideo(formData, sceneId = 1) {
   if (!formData.has("scene_id")) {
     formData.append("scene_id", sceneId);
   }
-  return request.post("/detection/video", formData, {
-    timeout: 120000, // 视频上传可能较慢
-  });
+  return (await request.post("/detection/video", formData, {
+    timeout: 120000,
+  })).data;
 }
 
 /**
@@ -81,6 +81,6 @@ export function detectVideo(formData, sceneId = 1) {
  * @param {number} taskId - 视频检测任务 ID
  * @returns {Promise} - { status, progress, result, ... }
  */
-export function getVideoStatus(taskId) {
-  return request.get(`/detection/video/status/${taskId}`);
+export async function getVideoStatus(taskId) {
+  return (await request.get(`/detection/video/status/${taskId}`)).data;
 }

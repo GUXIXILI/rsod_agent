@@ -7,12 +7,11 @@
 - 检测趋势
 """
 from datetime import datetime, timedelta
-from typing import Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.entity.db_models import DetectionTask, FireAlert, DetectionResult, DetectionScene
+from app.entity.db_models import DetectionTask, DetectionResult, DetectionScene
 
 
 class StatsService:

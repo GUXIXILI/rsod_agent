@@ -271,8 +271,8 @@ async def change_password(
     """修改密码（需验证旧密码）"""
     success = user_service.change_password(db, current_user.id, req.old_password, req.new_password)
     if not success:
-        return {"code": 400, "message": "旧密码错误"}
-    return {"code": 200, "message": "密码修改成功"}
+        return {"code": 400, "message": "旧密码错误", "data": None}
+    return {"code": 200, "message": "密码修改成功", "data": None}
 
 
 @router.post("/avatar")

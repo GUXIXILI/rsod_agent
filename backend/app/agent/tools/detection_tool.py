@@ -7,10 +7,15 @@
 检测类别：fire（火焰）、smoke（烟雾）
 """
 
-from typing import List, Optional
+import base64
+import json
+import os
+from typing import List
 
 from langchain_core.tools import tool
 
+from app.database.session import SessionLocal
+from app.entity.db_models import DetectionResult
 from app.services.detection_service import detection_service
 from app.core.logger import get_logger
 
@@ -33,45 +38,61 @@ def detect_single_image(
         iou: NMS（非极大值抑制）IoU 阈值（0.0~1.0），默认 0.45。用于去除重叠框。
 
     Returns:
-        str: 检测结果摘要，包含检测到的火焰/烟雾目标数量、置信度、火情等级等信息。
+        str: JSON 格式的检测结果，包含文字摘要、标注图 URL/base64、检测框列表等。
     """
-    import os
-    import tempfile
-
-    # 标记是否为 URL 下载的临时文件（用于后续清理）
-    _tmp_file_path = None
+    if not image_path:
+        return json.dumps({"error": "图片路径为空，请提供有效的图片路径或 URL。"}, ensure_ascii=False)
 
     try:
-        # ── URL 检测分支：如果 image_path 是 HTTP/HTTPS URL，先下载到临时文件 ──
+        # ── URL 检测分支：如果 image_path 是 HTTP/HTTPS URL，先下载到内存 ──
         if image_path.startswith(("http://", "https://")):
             logger.info("检测到 URL 图片，开始下载: %s", image_path)
-            import requests
-            try:
-                response = requests.get(image_path, timeout=30)
-                response.raise_for_status()
-            except requests.RequestException as e:
-                return f"错误：无法下载图片 '{image_path}'，请确认 URL 是否可访问。（{str(e)}）"
+            from urllib.parse import urlparse
 
-            # 将下载的图片写入临时文件（保留 .jpg 后缀以便 OpenCV 正确解码）
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp.write(response.content)
-                _tmp_file_path = tmp.name
-
-            # 从临时文件读取图片字节
-            with open(_tmp_file_path, "rb") as f:
-                image_bytes = f.read()
-
-            # 从 URL 中提取文件名
-            filename = os.path.basename(image_path.split("?")[0]) or "downloaded_image.jpg"
-            logger.info("URL 图片下载成功，临时文件: %s, 大小: %d bytes", _tmp_file_path, len(image_bytes))
+            # 判断是否为 MinIO 预签名 URL，若是则直接用 MinIO 客户端下载（避免 403）
+            from app.storage.minio_client import MinIOClient
+            parsed = urlparse(image_path)
+            # 从 URL 路径中提取对象名称：/bucket-name/object/path → object/path
+            path_parts = parsed.path.lstrip("/").split("/", 1)
+            if len(path_parts) > 1:
+                object_name = path_parts[1].split("?")[0]  # 去掉查询参数
+                try:
+                    minio = MinIOClient()
+                    stream = minio.get_file_stream(minio.bucket_name, object_name)
+                    image_bytes = stream.read()
+                    stream.close()
+                    filename = os.path.basename(object_name) or "downloaded_image.jpg"
+                    logger.info("通过 MinIO 客户端下载成功: %s, 大小: %d bytes", object_name, len(image_bytes))
+                except Exception as minio_err:
+                    # MinIO 客户端下载失败，回退到 HTTP 下载
+                    logger.warning("MinIO 客户端下载失败，回退到 HTTP: %s", minio_err)
+                    import requests
+                    try:
+                        response = requests.get(image_path, timeout=30)
+                        response.raise_for_status()
+                        image_bytes = response.content
+                        filename = os.path.basename(image_path.split("?")[0]) or "downloaded_image.jpg"
+                        logger.info("HTTP 下载成功，大小: %d bytes", len(image_bytes))
+                    except requests.RequestException as e:
+                        return json.dumps({"error": f"无法下载图片 '{image_path}'，请确认 URL 是否可访问。（{str(e)}）"}, ensure_ascii=False)
+            else:
+                # 非 MinIO URL，用 HTTP 下载
+                import requests
+                try:
+                    response = requests.get(image_path, timeout=30)
+                    response.raise_for_status()
+                    image_bytes = response.content
+                    filename = os.path.basename(image_path.split("?")[0]) or "downloaded_image.jpg"
+                    logger.info("HTTP 下载成功，大小: %d bytes", len(image_bytes))
+                except requests.RequestException as e:
+                    return json.dumps({"error": f"无法下载图片 '{image_path}'，请确认 URL 是否可访问。（{str(e)}）"}, ensure_ascii=False)
         else:
-            # ── 原有本地文件路径分支 ──
+            # ── 本地文件路径分支 ──
             with open(image_path, "rb") as f:
                 image_bytes = f.read()
             filename = os.path.basename(image_path)
 
         # ── 公共检测逻辑（URL 和本地文件共用） ──
-        from app.database.session import SessionLocal
         db = SessionLocal()
         try:
             # 使用默认场景 ID=1（火灾烟雾检测场景）
@@ -85,8 +106,14 @@ def detect_single_image(
                 iou_threshold=iou,
             )
 
+            # 如果检测任务失败，直接返回错误信息，避免伪装成“未检测到目标”
+            if getattr(task, "status", None) == "failed":
+                return json.dumps(
+                    {"error": task.error_message or "图片检测失败，请稍后重试。"},
+                    ensure_ascii=False,
+                )
+
             # 查询检测结果详情（每个检测到的目标）
-            from app.entity.db_models import DetectionResult
             detections = (
                 db.query(DetectionResult)
                 .filter(DetectionResult.task_id == task.id)
@@ -100,14 +127,17 @@ def detect_single_image(
             fire_level = task.fire_level or "unknown"
             inference_time = task.total_inference_time or 0
 
-            result_lines = [
-                f"检测完成！共发现 {total_count} 个目标：",
-            ]
-
-            # 逐条列出检测到的目标及置信度
+            result_lines = [f"检测完成！共发现 {total_count} 个目标："]
+            detection_list = []
             for det in detections:
                 class_cn = getattr(det, "class_name_cn", None) or det.class_name
                 result_lines.append(f"- {class_cn}: 置信度 {det.confidence:.2f}")
+                detection_list.append({
+                    "class_name": det.class_name,
+                    "class_name_cn": class_cn,
+                    "confidence": float(det.confidence),
+                    "bbox": det.bbox,
+                })
 
             result_lines.append(f"推理耗时: {inference_time:.0f}ms")
 
@@ -118,22 +148,42 @@ def detect_single_image(
             else:
                 result_lines.append("✅ 未检测到火焰或烟雾，当前状态安全。")
 
-            return "\n".join(result_lines)
+            summary = "\n".join(result_lines)
+
+            # 优先使用 MinIO URL；若上传失败，使用 detection_service 附加的 base64 兜底
+            annotated_image_url = task.annotated_url
+            annotated_image_base64 = getattr(task, "annotated_image_base64", None)
+            if not annotated_image_url and annotated_image_base64:
+                try:
+                    annotated_image_base64 = base64.b64encode(
+                        base64.b64decode(annotated_image_base64)
+                    ).decode("utf-8")
+                except Exception:
+                    logger.warning("标注图 base64 解码失败，将不返回该字段")
+                    annotated_image_base64 = None
+
+            result_payload = {
+                "summary": summary,
+                "annotated_image_url": annotated_image_url,
+                "fire_object_count": fire_count,
+                "smoke_object_count": smoke_count,
+                "total_objects": total_count,
+                "fire_level": fire_level,
+                "inference_time": inference_time,
+                "detections": detection_list,
+                "original_image_url": task.original_url,
+            }
+            # 仅当 base64 非空时才返回，避免前端因空字段误判
+            if annotated_image_base64:
+                result_payload["annotated_image_base64"] = annotated_image_base64
+            return json.dumps(result_payload, ensure_ascii=False)
         finally:
             db.close()
     except FileNotFoundError:
-        return f"错误：找不到图片文件 '{image_path}'，请确认文件路径是否正确。"
+        return json.dumps({"error": f"找不到图片文件 '{image_path}'，请确认文件路径是否正确。"}, ensure_ascii=False)
     except Exception as e:
         logger.exception("单图检测工具调用失败: image_path=%s", image_path)
-        return f"单图检测失败：{str(e)}"
-    finally:
-        # 清理 URL 下载产生的临时文件
-        if _tmp_file_path and os.path.exists(_tmp_file_path):
-            try:
-                os.unlink(_tmp_file_path)
-                logger.info("已清理临时文件: %s", _tmp_file_path)
-            except Exception:
-                pass
+        return json.dumps({"error": f"单图检测失败：{str(e)}"}, ensure_ascii=False)
 
 
 @tool
@@ -220,10 +270,15 @@ def detect_zip_images_file(
         str: ZIP 批量检测结果摘要，包含解压文件数、成功检测数、检出统计等。
     """
     try:
+        import os
+        zip_size = os.path.getsize(zip_path)
+        from app.config.settings import settings
+        if zip_size > settings.ZIP_MAX_SIZE_MB * 1024 * 1024:
+            return f"错误：ZIP 文件过大 ({zip_size / (1024*1024):.1f} MB)，超过最大限制 ({settings.ZIP_MAX_SIZE_MB} MB)。"
+
         with open(zip_path, "rb") as f:
             zip_bytes = f.read()
 
-        import os
         filename = os.path.basename(zip_path)
 
         from app.database.session import SessionLocal

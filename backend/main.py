@@ -1,3 +1,15 @@
+"""
+GLW 火灾烟雾智能检测预警平台 — 应用入口
+
+主要功能：
+- 创建 FastAPI 应用实例，配置 CORS、中间件、路由
+- 应用生命周期管理：启动时初始化 MinIO、知识库索引、定时任务
+- 托管前端静态文件（SPA 模式），非 API 路径回退到 index.html
+
+启动方式：
+    python main.py
+    uvicorn main:app --host 0.0.0.0 --port 8000
+"""
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +31,13 @@ from app.core.exceptions import register_exception_handlers
 from app.middleware.request_logger import RequestLogMiddleware
 from app.middleware.audit_log import AuditLogMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
+
+# ── 全局确定性推理设置 ────────────────────────────────
+# CPU 上 PyTorch 浮点运算存在非确定性（多线程累加顺序不同），
+# 导致 YOLO 模型推理结果随机波动，有时正常检测，有时全 0。
+# 开启确定性算法确保每次推理结果一致。
+import torch
+torch.use_deterministic_algorithms(True, warn_only=True)
 
 # ── 初始化日志系统 ────────────────────────────────────
 # 必须在创建 app 之前调用，确保后续所有模块的 logger 都已配置好

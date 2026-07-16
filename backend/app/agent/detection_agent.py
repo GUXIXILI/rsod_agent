@@ -198,7 +198,7 @@ class DetectionAgent:
                     yield {
                         "type": "tool_result",
                         "tool": tool_name,
-                        "result": str(tool_output)[:500] if tool_output else "",
+                        "result": str(tool_output) if tool_output else "",
                     }
 
         except Exception as e:

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import request from '@/utils/request'
+import { getSessions, getSessionMessages, deleteSession as deleteSessionApi, renameSession as renameSessionApi } from '@/api/chat'
 
 /**
  * 智能体状态管理 Store
@@ -31,7 +31,7 @@ export const useAgentStore = defineStore('agent', {
      */
     async fetchSessions() {
       try {
-        const res = await request.get('/chat/sessions')
+        const res = await getSessions()
         this.sessions = res.data?.items || []
       } catch (err) {
         console.error('获取会话列表失败:', err)
@@ -46,7 +46,7 @@ export const useAgentStore = defineStore('agent', {
       this.currentSessionId = sessionId
       this.messages = []
       try {
-        const res = await request.get(`/chat/sessions/${sessionId}/messages`)
+        const res = await getSessionMessages(sessionId)
         const rawMessages = res.data || []
         this.messages = rawMessages.map(m => this._transformMessage(m))
       } catch (err) {
@@ -61,7 +61,7 @@ export const useAgentStore = defineStore('agent', {
      */
     async deleteSession(sessionId) {
       try {
-        await request.delete(`/chat/sessions/${sessionId}`)
+        await deleteSessionApi(sessionId)
         this.sessions = this.sessions.filter(s => s.id !== sessionId)
         if (this.currentSessionId === sessionId) {
           this.newChat()
@@ -79,7 +79,7 @@ export const useAgentStore = defineStore('agent', {
      */
     async renameSession(sessionId, title) {
       try {
-        await request.patch(`/chat/sessions/${sessionId}`, { title })
+        await renameSessionApi(sessionId, title)
         const session = this.sessions.find(s => s.id === sessionId)
         if (session) {
           session.title = title
@@ -121,6 +121,8 @@ export const useAgentStore = defineStore('agent', {
      */
     _transformMessage(m) {
       return {
+        id: m.id ?? null,
+        _key: m.id != null ? `msg-${m.id}` : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         role: m.role,
         content: m.content || '',
         timestamp: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
@@ -164,6 +166,11 @@ export const useAgentStore = defineStore('agent', {
     addMessage(message) {
       if (!message.timestamp) {
         message.timestamp = Date.now()
+      }
+      if (!message._key) {
+        message._key = message.id != null
+          ? `msg-${message.id}`
+          : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       }
       this.messages.push(message)
     },

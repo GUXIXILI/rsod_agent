@@ -1,5 +1,5 @@
 <template>
-  <div class="detection-result-card">
+  <div v-if="isValidResult" class="detection-result-card">
     <div class="card-header">
       <el-icon><DataAnalysis /></el-icon>
       <span>检测结果</span>
@@ -16,6 +16,12 @@
           alt="检测标注图"
           @click="showFullImage = true"
         />
+      </div>
+
+      <!-- 单图模式：无可用标注图占位 -->
+      <div class="result-image-placeholder" v-else-if="!isBatch && result.type !== 'video'">
+        <el-icon><Picture /></el-icon>
+        <span>标注图暂不可用</span>
       </div>
 
       <!-- 批量模式：多图展示 -->
@@ -120,7 +126,7 @@
  *   - 目标总数和推理耗时
  *   - 各类别数量统计表格
  */
-import { DataAnalysis } from "@element-plus/icons-vue";
+import { DataAnalysis, Picture } from "@element-plus/icons-vue";
 import { computed, ref } from "vue";
 
 const props = defineProps({
@@ -133,18 +139,24 @@ const props = defineProps({
 const showFullImage = ref(false);
 const previewSrc = ref(null);
 
-/** 判断是否为批量检测结果 */
-const isBatch = computed(() => {
-  return Array.isArray(props.result.annotated_images) && props.result.annotated_images.length > 0;
+/** 结果是否为合法对象 */
+const isValidResult = computed(() => {
+  return props.result && typeof props.result === 'object';
 });
 
-/** 单图模式：标注图 URL（优先使用 MinIO URL，否则用 base64） */
+/** 判断是否为批量检测结果 */
+const isBatch = computed(() => {
+  return Array.isArray(props.result?.annotated_images) && props.result.annotated_images.length > 0;
+});
+
+/** 单图模式：标注图（优先使用 base64，避免 MinIO 预签名 URL 403） */
 const annotatedImageSrc = computed(() => {
-  if (props.result.annotated_image_url) {
-    return props.result.annotated_image_url;
-  }
+  if (!isValidResult.value) return null;
   if (props.result.annotated_image_base64) {
     return `data:image/jpeg;base64,${props.result.annotated_image_base64}`;
+  }
+  if (props.result.annotated_image_url) {
+    return props.result.annotated_image_url;
   }
   return null;
 });
@@ -158,7 +170,9 @@ const batchImages = computed(() => {
   }));
 });
 
-/** 点击预览图片 */
+/** 点击预览图片（全屏弹窗）
+ * @param {Object} img - 图片对象 { src, name }
+ */
 function previewImage(img) {
   previewSrc.value = img.src;
   showFullImage.value = true;
@@ -170,26 +184,38 @@ const thumbnailFrames = computed(() => {
   return frames.slice(0, 6);
 });
 
-/** 点击预览视频帧 */
+/** 点击预览视频帧（全屏弹窗）
+ * @param {Object} frame - 视频帧对象 { annotated_image_base64, frame_index, timestamp }
+ */
 function previewVideoFrame(frame) {
   previewSrc.value = `data:image/jpeg;base64,${frame.annotated_image_base64}`;
   showFullImage.value = true;
 }
 
-/** 目标总数（兼容多种后端字段名） */
+/** 目标总数（兼容 total_objects 与 fire_object_count + smoke_object_count） */
 const totalObjects = computed(() => {
   return props.result.total_objects
-    ?? (props.result.fire_object_count || 0) + (props.result.smoke_object_count || 0)
-    ?? 0;
+    ?? ((props.result.fire_object_count || 0) + (props.result.smoke_object_count || 0));
 });
 
-/** 类别统计转为数组（用于 el-table，兼容 data.class_counts） */
+/** 类别统计转为数组（用于 el-table，兼容 data.class_counts 与直接字段） */
 const classCountsArray = computed(() => {
   const counts = props.result.class_counts || props.result.data?.class_counts || {};
-  return Object.entries(counts).map(([className, count]) => ({
-    className,
-    count,
-  }));
+  if (Object.keys(counts).length > 0) {
+    return Object.entries(counts).map(([className, count]) => ({
+      className,
+      count,
+    }));
+  }
+  // 兜底：从 fire_object_count / smoke_object_count 构建
+  const items = [];
+  if (props.result.fire_object_count) {
+    items.push({ className: 'fire', count: props.result.fire_object_count });
+  }
+  if (props.result.smoke_object_count) {
+    items.push({ className: 'smoke', count: props.result.smoke_object_count });
+  }
+  return items;
 });
 </script>
 
@@ -234,6 +260,22 @@ const classCountsArray = computed(() => {
       opacity: 0.8;
     }
   }
+}
+
+.result-image-placeholder {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 160px;
+  background: #fafafa;
+  border: 1px dashed #dcdfe6;
+  border-radius: 4px;
+  color: #909399;
+  font-size: 13px;
 }
 
 .result-images-grid {

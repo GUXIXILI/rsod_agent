@@ -52,7 +52,7 @@
 import { ref, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Message } from '@element-plus/icons-vue'
-import request from '@/utils/request'
+import { forgotPasswordApi } from '@/api/auth'
 
 const formRef = ref(null)
 const loading = ref(false)
@@ -74,7 +74,7 @@ const handleSubmit = async () => {
 
   loading.value = true
   try {
-    await request.post('/auth/forgot-password', { email: formData.email })
+    await forgotPasswordApi({ email: formData.email })
     ElMessage.success('重置邮件已发送，请查收邮箱')
   } catch (error) {
     ElMessage.error(error.response?.data?.detail || '发送失败，请稍后重试')

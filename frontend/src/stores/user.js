@@ -74,7 +74,7 @@ export const useUserStore = defineStore('user', {
 
       // 清除 localStorage
       localStorage.removeItem('rsod_token')
-localStorage.removeItem('rsod_refresh_token')
+      localStorage.removeItem('rsod_refresh_token')
       localStorage.removeItem('user')
     },
 

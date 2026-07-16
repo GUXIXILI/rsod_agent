@@ -101,6 +101,7 @@ async def upload_chat_file(
 
     return {
         "code": 200,
+        "message": "success",
         "data": {
             "url": url,
             "type": file_type,

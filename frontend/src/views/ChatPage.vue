@@ -52,15 +52,15 @@
           <h2>你好！我是火灾烟雾智能检测智能体</h2>
           <p class="welcome-desc">上传图片或视频，我可以帮你检测火情和烟雾目标</p>
           <div class="welcome-tips">
-            <div class="tip-item" @click="inputTextPlaceholder = '检测一下这张图片中的火情'">
+            <div class="tip-item">
               <el-icon><Picture /></el-icon>
               <span>图片检测</span>
             </div>
-            <div class="tip-item" @click="inputTextPlaceholder = '帮我分析这段视频中的烟雾'">
+            <div class="tip-item">
               <el-icon><VideoCamera /></el-icon>
               <span>视频检测</span>
             </div>
-            <div class="tip-item" @click="inputTextPlaceholder = '批量检测这个 ZIP 中的图片'">
+            <div class="tip-item">
               <el-icon><Folder /></el-icon>
               <span>批量检测</span>
             </div>
@@ -69,8 +69,8 @@
 
         <!-- 消息项 -->
         <div
-          v-for="(msg, index) in agentStore.messages"
-          :key="index"
+          v-for="msg in agentStore.messages"
+          :key="msg._key"
           :class="['message-item', `message-${msg.role}`]"
         >
           <!-- 用户消息 -->
@@ -194,10 +194,10 @@ import ChatInput from '@/components/chat/ChatInput.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import DetectionResultCard from '@/components/DetectionResultCard.vue'
 import { useAgentStore } from '@/stores/agent'
-import request from '@/utils/request'
 import { renderMarkdown } from '@/utils/markdown'
 import { streamChat } from '@/utils/stream'
 import { detectBatch, detectSingle, detectVideo, detectZip, getVideoStatus } from '@/api/detection'
+import { uploadChatFile } from '@/api/chat'
 import { ChatDotRound, CircleCheck, CircleClose, Folder, Loading, Picture, Refresh, VideoCamera } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, nextTick, onMounted, ref } from 'vue'
@@ -207,12 +207,10 @@ const agentStore = useAgentStore()
 
 // ── 响应式状态 ──
 const messageListRef = ref(null)
-const inputTextPlaceholder = ref('')
 
 // 重试用
 const lastSentMessage = ref('')
 const lastSentImage = ref(null)
-const lastSentFiles = ref([])
 
 // ── 计算属性 ──
 const currentSessionTitle = computed(() => {
@@ -222,19 +220,38 @@ const currentSessionTitle = computed(() => {
 })
 
 // ── 会话管理 ──
+
+/**
+ * 创建新会话
+ * 调用 agentStore 的新建会话方法，清空当前消息列表
+ */
 function handleNewSession() {
   agentStore.newChat()
 }
 
+/**
+ * 切换到指定会话
+ * 加载目标会话的消息历史，并滚动到底部
+ * @param {number} sessionId - 目标会话 ID
+ */
 async function handleSwitchSession(sessionId) {
   await agentStore.switchSession(sessionId)
   scrollToBottom()
 }
 
+/**
+ * 删除指定会话
+ * @param {number} sessionId - 要删除的会话 ID
+ */
 async function handleDeleteSession(sessionId) {
   await agentStore.deleteSession(sessionId)
 }
 
+/**
+ * 重命名指定会话
+ * @param {number} sessionId - 会话 ID
+ * @param {string} title - 新的会话标题
+ */
 async function handleRenameSession(sessionId, title) {
   try {
     await agentStore.renameSession(sessionId, title)
@@ -245,6 +262,16 @@ async function handleRenameSession(sessionId, title) {
 }
 
 // ── 发送消息 ──
+
+/**
+ * 发送消息（文字 + 文件）
+ * 1. 上传文件到后端
+ * 2. 添加用户消息到对话框
+ * 3. 发起 SSE 流式请求获取 AI 回复
+ * @param {Object} payload - 发送内容
+ * @param {string} payload.text - 文字消息内容
+ * @param {File[]} [payload.files] - 附件文件列表
+ */
 async function handleSend({ text, files }) {
   if (!text && (!files || files.length === 0)) return
 
@@ -258,9 +285,7 @@ async function handleSend({ text, files }) {
       for (const file of files) {
         const formData = new FormData()
         formData.append('file', file)
-        const res = await request.post('/chat/upload', formData, {
-          headers: { 'Content-Type': 'multipart/form-data' }
-        })
+        const res = await uploadChatFile(formData)
         uploadedFiles.push(res.data) // {url, type, name}
       }
       ElMessage.success(`文件上传完成 (${uploadedFiles.length} 个)`)
@@ -273,7 +298,6 @@ async function handleSend({ text, files }) {
   // Step 2: 添加用户消息（含文件预览）
   lastSentMessage.value = message
   lastSentImage.value = (files && files.length > 0) ? files[0] : null
-  lastSentFiles.value = uploadedFiles
 
   const userMsg = {
     role: 'user',
@@ -324,7 +348,6 @@ async function handleSend({ text, files }) {
 
   const stop = streamChat('/api/chat/messages/stream', requestBody, {
     onMessage: (data) => {
-      console.log('[SSE事件]', data.type, data)
       const lastMsg = agentStore.getLastAssistantMessage()
       if (!lastMsg) return
 
@@ -344,7 +367,7 @@ async function handleSend({ text, files }) {
           if (!lastMsg.toolCalls) lastMsg.toolCalls = []
           lastMsg.toolCalls.push({
             tool: data.tool || '未知工具',
-            input: data.input,
+            input: data.input || data.args,
             status: 'running',
             startTime: Date.now(),
           })
@@ -358,16 +381,27 @@ async function handleSend({ text, files }) {
               runningTc.status = 'completed'
               runningTc.result = data.result
               try {
-                const result = JSON.parse(data.result)
-                if (result.detections) {
+                const result = data.result ? JSON.parse(data.result) : {}
+                if (result.error) {
+                  runningTc.status = 'failed'
+                  runningTc.resultSummary = result.error
+                  const errorText = `检测失败：${result.error}`
+                  lastMsg.content = lastMsg.content ? `${lastMsg.content}\n${errorText}` : errorText
+                  lastMsg.loading = false
+                } else if (Array.isArray(result.detections)) {
                   runningTc.resultSummary = `检测到 ${(result.fire_object_count || 0) + (result.smoke_object_count || 0)} 个目标`
                   lastMsg.detectionResult = result
                   lastMsg.loading = false
                 } else {
                   runningTc.resultSummary = JSON.stringify(result).substring(0, 200)
                 }
-              } catch {
+              } catch (parseErr) {
+                runningTc.status = 'failed'
                 runningTc.resultSummary = (data.result || '').substring(0, 200)
+                const failText = '工具结果解析失败，请稍后重试'
+                lastMsg.content = lastMsg.content ? `${lastMsg.content}\n${failText}` : failText
+                lastMsg.loading = false
+                console.error('[tool_end] 解析失败:', parseErr, data.result)
               }
             }
           }
@@ -406,34 +440,52 @@ async function handleSend({ text, files }) {
         case 'tool_call':
           lastMsg.thinking = false
           lastMsg.loading = true
-          lastMsg.toolCall = { tool: data.tool, input: data.input }
+          lastMsg.toolCall = { tool: data.tool, input: data.input || data.args }
           if (!lastMsg.toolCalls) lastMsg.toolCalls = []
           lastMsg.toolCalls.push({
             tool: data.tool,
-            input: data.input,
+            input: data.input || data.args,
             status: 'running',
             startTime: Date.now(),
           })
           break
 
-        case 'tool_result':
+        case 'tool_result': {
+          let toolResult = null
           if (lastMsg.toolCalls && lastMsg.toolCalls.length > 0) {
             const runningTc = [...lastMsg.toolCalls].reverse().find((tc) => tc.status === 'running')
             if (runningTc) {
               runningTc.status = 'completed'
               runningTc.result = data.result
+              toolResult = runningTc
             }
           }
           try {
-            const result = JSON.parse(data.result)
-            if (result.detections) {
+            const result = data.result ? JSON.parse(data.result) : {}
+            if (result.error) {
+              if (toolResult) toolResult.status = 'failed'
+              const errorText = `检测失败：${result.error}`
+              lastMsg.content = lastMsg.content ? `${lastMsg.content}\n${errorText}` : errorText
+              lastMsg.loading = false
+            } else if (Array.isArray(result.detections)) {
+              if (toolResult) {
+                toolResult.resultSummary = `检测到 ${(result.fire_object_count || 0) + (result.smoke_object_count || 0)} 个目标`
+              }
               lastMsg.detectionResult = result
               lastMsg.loading = false
+            } else if (toolResult) {
+              toolResult.resultSummary = JSON.stringify(result).substring(0, 200)
             }
-          } catch (e) {
-            lastMsg.content += `\n[工具结果: ${data.result?.substring(0, 100)}...]`
+          } catch (parseErr) {
+            if (toolResult) toolResult.status = 'failed'
+            if (toolResult) toolResult.resultSummary = (data.result || '').substring(0, 200)
+            const failText = '工具结果解析失败，请稍后重试'
+            lastMsg.content = lastMsg.content ? `${lastMsg.content}\n${failText}` : failText
+            lastMsg.loading = false
+            console.error('[tool_result] 解析失败:', parseErr, data.result)
           }
           break
+        }
 
         default:
           if (data.content) {
@@ -480,6 +532,11 @@ async function handleSend({ text, files }) {
 }
 
 // ── 重试 ──
+
+/**
+ * 重试最后一条消息
+ * 移除上一条 AI 错误消息和用户消息，重新发送
+ */
 async function retryLastMessage() {
   if (!lastSentMessage.value && !lastSentImage.value) {
     ElMessage.warning('没有可重试的消息')
@@ -501,6 +558,11 @@ async function retryLastMessage() {
 }
 
 // ── 停止 ──
+
+/**
+ * 停止当前 AI 生成
+ * 中断 SSE 连接，并将所有运行中的工具调用标记为失败
+ */
 function handleStop() {
   agentStore.abort()
   const lastMsg = agentStore.getLastAssistantMessage()
@@ -517,6 +579,11 @@ function handleStop() {
 }
 
 // ── 滚动 ──
+
+/**
+ * 滚动到消息列表底部
+ * 使用 nextTick 确保 DOM 更新后再执行滚动
+ */
 function scrollToBottom() {
   nextTick(() => {
     if (messageListRef.value) {
@@ -526,6 +593,12 @@ function scrollToBottom() {
 }
 
 // ── 快捷检测 ──
+
+/**
+ * 快捷检测入口
+ * 根据类型弹出文件选择器，直接调用后端检测接口（跳过 LLM）
+ * @param {string} type - 检测类型：'single'（单图检测）、'batch'（批量/ZIP检测）
+ */
 async function handleQuickDetect(type) {
   if (type === 'single') {
     const input = document.createElement('input')
@@ -626,6 +699,11 @@ async function handleQuickDetect(type) {
   }
 }
 
+/**
+ * 视频检测入口
+ * 弹出文件选择器，上传视频文件并轮询检测进度
+ * 视频文件大小限制为 50MB
+ */
 async function handleVideoDetect() {
   const input = document.createElement('input')
   input.type = 'file'
@@ -673,6 +751,12 @@ async function handleVideoDetect() {
   input.click()
 }
 
+/**
+ * 轮询视频检测进度
+ * 每 3 秒查询一次视频检测状态，直到完成或失败
+ * @param {number} taskId - 视频检测任务 ID
+ * @returns {Promise<Object|null>} 检测结果或 null（失败时）
+ */
 async function pollVideoProgress(taskId) {
   const pollInterval = 3000
   return new Promise((resolve) => {
@@ -716,9 +800,6 @@ async function pollVideoProgress(taskId) {
 
 onMounted(async () => {
   await agentStore.fetchSessions()
-  if (agentStore.messages.length === 0) {
-    // 欢迎消息在模板中通过 v-if 处理
-  }
 })
 </script>
 

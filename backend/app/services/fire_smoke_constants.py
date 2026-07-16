@@ -1,4 +1,11 @@
-"""Shared constants for fire and smoke model services."""
+"""
+火灾烟雾检测模型常量
 
+定义 YOLO 模型预期的类别映射：
+- 0: fire（火焰）
+- 1: smoke（烟雾）
 
+模型加载时需校验实际类别与此常量一致，防止加载了错误的模型。
+"""
+# 预期类别映射：类别 ID → 类别名称
 EXPECTED_CLASSES = {0: "fire", 1: "smoke"}

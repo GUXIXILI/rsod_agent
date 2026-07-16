@@ -1,4 +1,11 @@
-"""模型导出与下载制品解析服务。"""
+"""
+模型导出与下载制品解析服务
+
+提供 YOLO 模型的导出和下载功能：
+- 导出格式支持：ONNX (.onnx)、TorchScript (.torchscript)
+- 下载格式支持：PyTorch (.pt)、ONNX、TorchScript
+- 导出后的模型文件存储在 ModelVersion 对应的模型目录下
+"""
 
 from pathlib import Path
 
@@ -6,11 +13,12 @@ from ultralytics import YOLO
 
 from app.entity.db_models import ModelVersion
 
-
+# 导出格式与文件后缀映射
 EXPORT_SUFFIXES = {
     "onnx": ".onnx",
     "torchscript": ".torchscript",
 }
+# 下载支持的格式与后缀映射（包含原生 PT 格式）
 DOWNLOAD_SUFFIXES = {
     "pt": ".pt",
     **EXPORT_SUFFIXES,
@@ -18,7 +26,7 @@ DOWNLOAD_SUFFIXES = {
 
 
 class ModelArtifactError(ValueError):
-    """模型制品不存在、格式无效或导出失败。"""
+    """模型制品操作异常：导出/下载失败时抛出"""
 
 
 def _get_model_version(db, model_version_id: int) -> ModelVersion:

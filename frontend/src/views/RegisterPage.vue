@@ -95,6 +95,17 @@
 </template>
 
 <script setup>
+/**
+ * RegisterPage.vue — 用户注册页面
+ *
+ * 功能说明：
+ *   - 全屏居中注册卡片，渐变色背景（与登录页一致）
+ *   - 支持用户名、邮箱、密码、确认密码输入
+ *   - 表单验证：用户名 3-50 字符、邮箱格式、密码 6-30 字符、确认密码一致性
+ *   - 注册成功后跳转登录页
+ *   - 注册失败时采用页面内静态提示，避免 ElMessage 弹窗未渲染
+ *   - 底部提供返回登录链接
+ */
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'

@@ -90,14 +90,22 @@ class Settings(BaseSettings):
     ZIP_MAX_SIZE_MB: int = 200       # ZIP 解压后最大总大小（MB）
     ZIP_MAX_IMAGES: int = 100        # ZIP 中最多处理的图片数量
 
-    # Fire/smoke inference configuration
+    # ── 火灾烟雾检测推理配置 ──────────────────────────
+    # 模型权重路径（相对于 backend/ 目录）
     FIRE_SMOKE_MODEL_PATH: str = "models/fire_smoke_yolo11n_v1/best.pt"
+    # 推理设备："0" 表示 GPU 0，"cpu" 表示纯 CPU 推理
     FIRE_SMOKE_DEVICE: str = "0"
+    # 图片检测：火焰阈值（建议 0.25~0.35，过低会大量误报）
     FIRE_SMOKE_IMAGE_FIRE_THRESHOLD: float = 0.25
+    # 图片检测：烟雾阈值（建议 0.15~0.25，烟雾特征弱于火焰，阈值可适当降低）
     FIRE_SMOKE_IMAGE_SMOKE_THRESHOLD: float = 0.20
+    # 视频检测：火焰阈值（视频场景变动大，建议略低于图片检测）
     FIRE_SMOKE_VIDEO_FIRE_THRESHOLD: float = 0.20
+    # 视频检测：烟雾阈值
     FIRE_SMOKE_VIDEO_SMOKE_THRESHOLD: float = 0.20
+    # 视频检测：火焰确认所需连续帧数（减少视频误报）
     FIRE_SMOKE_FIRE_CONFIRM_FRAMES: int = 3
+    # 视频检测：烟雾确认所需连续帧数
     FIRE_SMOKE_SMOKE_CONFIRM_FRAMES: int = 3
 
     # ── 定时任务配置 ──────────────────────────────────

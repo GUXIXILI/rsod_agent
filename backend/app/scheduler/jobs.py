@@ -3,7 +3,6 @@
 
 所有周期性任务的注册入口。
 """
-import logging
 from datetime import datetime, timedelta
 
 from app.core.logger import get_logger

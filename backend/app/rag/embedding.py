@@ -9,7 +9,6 @@
 """
 
 import hashlib
-import struct
 from typing import List
 
 from app.config.settings import settings

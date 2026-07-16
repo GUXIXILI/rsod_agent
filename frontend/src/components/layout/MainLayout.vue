@@ -15,6 +15,12 @@
 </template>
 
 <script setup>
+/**
+ * MainLayout.vue — 主布局组件
+ *
+ * 三栏布局结构：顶部导航栏（AppHeader）+ 左侧侧边栏（AppSidebar）+ 右侧主内容区（router-view）
+ * 仅在登录后展示，包裹所有认证路由的子页面
+ */
 import AppHeader from './AppHeader.vue'
 import AppSidebar from './AppSidebar.vue'
 </script>
