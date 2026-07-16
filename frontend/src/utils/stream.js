@@ -37,7 +37,7 @@ export function streamChat(url, body, callbacks) {
   const { onMessage, onDone, onError } = callbacks;
 
   // 从 localStorage 获取 Token（与 request.js 统一使用 "token" 字段名）
-  const token = localStorage.getItem("token");
+  const token = localStorage.getItem("rsod_token");
 
   // 使用 fetch + ReadableStream 实现 SSE
   const controller = new AbortController();

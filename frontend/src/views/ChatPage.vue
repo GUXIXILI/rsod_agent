@@ -360,6 +360,7 @@ async function sendMessage() {
   }
 
   // 发起 SSE 流式请求
+  // 后端 /api/chat/messages/stream 要求字段名为 content
   const requestBody = {
     content: userContent,
     ...(Number.isInteger(agentStore.currentSessionId)

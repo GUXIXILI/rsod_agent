@@ -931,7 +931,7 @@ async function downloadModel() {
   try {
     const taskId = selectedTask.value.task_uuid;
     // 使用 fetch 下载文件（需要携带 Token）
-    const token = localStorage.getItem("token") || "";
+    const token = localStorage.getItem("rsod_token") || "";
     const response = await fetch(`/training/download/${taskId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -977,7 +977,7 @@ async function downloadONNX() {
   if (!onnxExportUrl.value || !selectedTask.value) return;
   try {
     const taskId = selectedTask.value.task_uuid;
-    const token = localStorage.getItem("token") || "";
+    const token = localStorage.getItem("rsod_token") || "";
     const downloadUrl = onnxExportUrl.value.startsWith("http")
       ? onnxExportUrl.value
       : `/training/download/${taskId}?format=onnx`;

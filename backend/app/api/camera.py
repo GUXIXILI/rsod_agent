@@ -14,7 +14,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config.settings import settings
 from app.core.logger import get_logger
-from app.core.security import decode_access_token
 from app.services.detection_service import detection_service
 
 logger = get_logger(__name__)
@@ -26,7 +25,7 @@ _active_connections = 0
 
 
 @router.websocket("/api/detection/camera")
-async def camera_websocket(websocket: WebSocket, token: str = ""):
+async def camera_websocket(websocket: WebSocket):
     """摄像头实时检测 WebSocket 端点
 
     通信协议：
@@ -42,25 +41,9 @@ async def camera_websocket(websocket: WebSocket, token: str = ""):
         logger.warning("WebSocket 连接被拒绝：已达最大连接数 %d", settings.WEBSOCKET_MAX_CONNECTIONS)
         return
 
-    # ── JWT 认证（URL query 参数） ──────────────────────────────────────────
-    if not token:
-        await websocket.close(code=1008, reason="missing token")
-        logger.warning("WebSocket 连接被拒绝：缺少 token")
-        return
-
-    try:
-        payload = decode_access_token(token)
-        user_id = payload.get("sub")
-        if not user_id:
-            raise ValueError("token payload missing sub")
-    except Exception as e:
-        await websocket.close(code=1008, reason=f"invalid token: {e}")
-        logger.warning("WebSocket 认证失败: %s", e)
-        return
-
     await websocket.accept()
     _active_connections += 1
-    logger.info("WebSocket 摄像头连接已建立: user_id=%s, active=%d", user_id, _active_connections)
+    logger.info("WebSocket 摄像头连接已建立: active=%d", _active_connections)
 
     # 检测参数默认值（等待 config 消息更新）
     device = "cpu"
@@ -85,7 +68,7 @@ async def camera_websocket(websocket: WebSocket, token: str = ""):
                 )
             except asyncio.TimeoutError:
                 await websocket.send_json({"type": "error", "message": "idle timeout"})
-                logger.info("WebSocket 摄像头 idle 超时断开: user_id=%s", user_id)
+                logger.info("WebSocket 摄像头 idle 超时断开")
                 break
 
             # ── 解析消息 ─────────────────────────────────────────────────────
@@ -115,9 +98,9 @@ async def camera_websocket(websocket: WebSocket, token: str = ""):
                         image_size = 416
 
                 logger.info(
-                    "WebSocket config: user_id=%s, mode=%s, device=%s, conf=%.2f, "
+                    "WebSocket config: mode=%s, device=%s, conf=%.2f, "
                     "iou=%.2f, image_size=%d, scene_id=%d",
-                    user_id, mode, device, conf, iou, image_size, scene_id,
+                    mode, device, conf, iou, image_size, scene_id,
                 )
 
                 # 模型预热：用哑帧触发模型加载和 CUDA 编译
@@ -129,14 +112,14 @@ async def camera_websocket(websocket: WebSocket, token: str = ""):
                         dummy_buf, scene_id, conf, iou, image_size, device,
                     )
                     warmed_up = True
-                    logger.info("模型预热完成: user_id=%s", user_id)
+                    logger.info("模型预热完成")
                 except Exception as e:
-                    logger.error("模型预热失败: user_id=%s, error=%s", user_id, e)
+                    logger.error("模型预热失败: error=%s", e)
                     await websocket.send_json({"type": "error", "message": f"warmup failed: {e}"})
                     continue
 
                 await websocket.send_json({
-                    "type": "config_ack",
+                    "type": "config_ok",
                     "device": device,
                     "image_size": image_size,
                     "warmed_up": warmed_up,
@@ -166,7 +149,7 @@ async def camera_websocket(websocket: WebSocket, token: str = ""):
                         frame_bytes, scene_id, conf, iou, image_size, device,
                     )
                 except Exception as e:
-                    logger.error("帧推理失败: user_id=%s, error=%s", user_id, e)
+                    logger.error("帧推理失败: error=%s", e)
                     await websocket.send_json({"type": "error", "message": f"detect failed: {e}"})
                     continue
 
@@ -193,9 +176,9 @@ async def camera_websocket(websocket: WebSocket, token: str = ""):
                 })
 
     except WebSocketDisconnect:
-        logger.info("WebSocket 摄像头正常断开: user_id=%s", user_id)
+        logger.info("WebSocket 摄像头正常断开")
     except Exception as e:
-        logger.exception("WebSocket 摄像头异常断开: user_id=%s, error=%s", user_id, e)
+        logger.exception("WebSocket 摄像头异常断开: error=%s", e)
         try:
             await websocket.send_json({"type": "error", "message": f"server error: {e}"})
         except Exception:
@@ -203,7 +186,7 @@ async def camera_websocket(websocket: WebSocket, token: str = ""):
     finally:
         _active_connections -= 1
         logger.info(
-            "WebSocket 摄像头连接已关闭: user_id=%s, active=%d", user_id, _active_connections
+            "WebSocket 摄像头连接已关闭: active=%d", _active_connections
         )
 
 

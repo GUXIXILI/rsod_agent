@@ -110,7 +110,7 @@ router.beforeEach((to, from, next) => {
     : 'Fire & Smoke Detection Platform'
 
   // 2. 从 localStorage 直接读取 token，避免在守卫中导入 Pinia store 导致循环依赖
-  const token = localStorage.getItem('token')
+  const token = localStorage.getItem('rsod_token')
 
   // 3. 未登录访问需要认证的页面 → 跳转登录页，携带 redirect 参数供登录后回跳
   if (to.meta.requiresAuth !== false && !token) {
