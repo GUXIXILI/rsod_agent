@@ -147,6 +147,17 @@
           导出模型
         </el-button>
         <el-button @click="downloadModel"> 下载权重 </el-button>
+        <!-- ONNX 导出按钮 -->
+        <el-button type="info" @click="exportONNX" :loading="onnxExporting">
+          导出 ONNX
+        </el-button>
+        <el-button
+          v-if="onnxExportUrl"
+          type="primary"
+          @click="downloadONNX"
+        >
+          下载 ONNX 模型
+        </el-button>
         <el-button type="warning" @click="showPredictDialog = true">
           测试验证
         </el-button>
@@ -359,9 +370,12 @@
       <el-form :model="trainForm" label-width="120px">
         <el-form-item label="检测场景">
           <el-select v-model="trainForm.scene_id" placeholder="选择场景">
-            <el-option label="遥感目标检测" :value="1" />
-            <el-option label="工业缺陷检测" :value="2" />
-            <el-option label="农业病害检测" :value="3" />
+            <el-option
+              v-for="scene in sceneList"
+              :key="scene.id"
+              :label="scene.display_name || scene.name"
+              :value="scene.id"
+            />
           </el-select>
         </el-form-item>
 
@@ -441,6 +455,7 @@
 </template>
 
 <script setup>
+import { getActiveScenes } from "@/api/training";
 import request from "@/utils/request";
 import { Plus, Refresh, UploadFilled } from "@element-plus/icons-vue";
 import * as echarts from "echarts";
@@ -453,6 +468,9 @@ const loadingTasks = ref(false);
 const selectedTask = ref(null);
 const showCreateDialog = ref(false);
 const creating = ref(false);
+
+// ── 场景列表（动态获取） ──
+const sceneList = ref([]);
 
 // ── 图表引用 ──
 const lossChartRef = ref(null);
@@ -539,6 +557,23 @@ function statusText(status) {
   return map[status] || status;
 }
 
+// ── 获取场景列表（动态加载） ──
+async function fetchScenes() {
+  try {
+    const res = await getActiveScenes();
+    sceneList.value = res.data || [];
+    // 若当前 form 中 scene_id 未设置或不在列表中，默认选中第一个
+    if (sceneList.value.length > 0) {
+      const exists = sceneList.value.some((s) => s.id === trainForm.value.scene_id);
+      if (!exists) {
+        trainForm.value.scene_id = sceneList.value[0].id;
+      }
+    }
+  } catch (e) {
+    console.error("获取场景列表失败", e);
+  }
+}
+
 // ── 获取任务列表 ──
 async function fetchTasks() {
   loadingTasks.value = true;
@@ -558,6 +593,7 @@ async function selectTask(task) {
   evalReport.value = null;
   predictResult.value = null;
   predictFile.value = null;
+  onnxExportUrl.value = null;
   await nextTick();
   initCharts();
   fetchMetrics();
@@ -784,6 +820,10 @@ const exportForm = ref({
   upload_minio: true,
 });
 
+// ── 【新增】ONNX 导出相关状态 ──
+const onnxExporting = ref(false);
+const onnxExportUrl = ref(null);
+
 // ── 【新增】测试验证相关状态 ──
 const showPredictDialog = ref(false);
 const predicting = ref(false);
@@ -891,7 +931,7 @@ async function downloadModel() {
   try {
     const taskId = selectedTask.value.task_uuid;
     // 使用 fetch 下载文件（需要携带 Token）
-    const token = localStorage.getItem("token") || "";
+    const token = localStorage.getItem("rsod_token") || "";
     const response = await fetch(`/training/download/${taskId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -908,6 +948,55 @@ async function downloadModel() {
     ElMessage.success("模型下载已开始");
   } catch (e) {
     ElMessage.error("模型下载失败");
+  }
+}
+
+// ── 【新增】导出 ONNX 模型 ──
+async function exportONNX() {
+  if (!selectedTask.value) return;
+  onnxExporting.value = true;
+  onnxExportUrl.value = null;
+  try {
+    const taskId = selectedTask.value.task_uuid;
+    const res = await request.post(`/training/export/${taskId}`, {
+      format: "onnx",
+      ...exportForm.value,
+    });
+    // 保存 ONNX 下载 URL
+    onnxExportUrl.value = res.download_url || `/training/download/${taskId}?format=onnx`;
+    ElMessage.success(res.message || "ONNX 模型导出成功");
+  } catch (e) {
+    // 响应拦截器已显示具体错误
+  } finally {
+    onnxExporting.value = false;
+  }
+}
+
+// ── 【新增】下载 ONNX 模型 ──
+async function downloadONNX() {
+  if (!onnxExportUrl.value || !selectedTask.value) return;
+  try {
+    const taskId = selectedTask.value.task_uuid;
+    const token = localStorage.getItem("rsod_token") || "";
+    const downloadUrl = onnxExportUrl.value.startsWith("http")
+      ? onnxExportUrl.value
+      : `/training/download/${taskId}?format=onnx`;
+    const response = await fetch(downloadUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error("下载失败");
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `best_${selectedTask.value.task_uuid}.onnx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+    ElMessage.success("ONNX 模型下载已开始");
+  } catch (e) {
+    ElMessage.error("ONNX 模型下载失败");
   }
 }
 
@@ -944,6 +1033,7 @@ async function runPredict() {
 
 // ── 生命周期 ──
 onMounted(() => {
+  fetchScenes();
   fetchTasks();
 });
 
@@ -1010,17 +1100,18 @@ onBeforeUnmount(() => {
 .action-card,
 .eval-card {
   margin-bottom: 20px;
+  border-radius: 8px;
+  border: 1px solid #ebeef5;
+  transition: box-shadow 0.3s ease;
+}
+
+.task-list-card:hover,
+.monitor-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
 }
 
 .predict-upload {
   border-radius: 8px;
-}
-.action-card,
-.eval-card {
-  margin-bottom: 20px;
-}
-
-.predict-upload {
   width: 100%;
 }
 

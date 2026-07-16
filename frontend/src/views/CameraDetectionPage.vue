@@ -157,8 +157,8 @@
       <!-- GPU/CPU 模式选择 -->
       <span class="control-label">推理模式：</span>
       <el-radio-group v-model="detectMode" :disabled="isRunning">
-        <el-radio-button label="cpu">CPU 节能</el-radio-button>
-        <el-radio-button label="gpu">GPU 加速</el-radio-button>
+        <el-radio-button value="cpu">CPU 节能</el-radio-button>
+        <el-radio-button value="gpu">GPU 加速</el-radio-button>
       </el-radio-group>
 
       <el-divider direction="vertical" />

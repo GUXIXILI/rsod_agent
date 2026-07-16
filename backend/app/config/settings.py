@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     DB_PORT: int = 5433
     DB_NAME: str = "rsod_agent"
     DB_USER: str = "rsod_admin"
-    DB_PASSWORD: str = "rsod_admin"
+    DB_PASSWORD: str = ""
 
     @property
     def DATABASE_URL(self) -> str:
@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     # ── Redis 配置 ────────────────────────────────────
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
 
     @property
     def REDIS_URL(self) -> str:
@@ -41,13 +42,26 @@ class Settings(BaseSettings):
 
     # ── MinIO 配置 ────────────────────────────────────
     MINIO_ENDPOINT: str = "localhost:9000"
-    MINIO_ACCESS_KEY: str = "minioadmin"
-    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_ACCESS_KEY: str = ""
+    MINIO_SECRET_KEY: str = ""
     MINIO_BUCKET: str = "fire-detection-images"
     MINIO_SECURE: bool = False
 
     # ── LLM 配置 ──────────────────────────────────────
     LLM_STUB_MODE: bool = True
+    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    QWEN_MODEL: str = "qwen-plus"
+    USE_LOCAL_LLM: bool = False
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen2.5:7b"
+
+    # ── RAG / Embedding 配置 ───────────────────────────
+    # 向量化模型名称，支持 openai 或 qwen（通义千问）系列
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # OpenAI API Key（占位值，实际使用时需配置）
+    OPENAI_API_KEY: str = ""
+    # 通义千问 API Key（占位值，实际使用时需配置）
+    QWEN_API_KEY: str = ""
 
     # ── JWT 认证配置 ──────────────────────────────────
     JWT_SECRET_KEY: str = ""
@@ -67,6 +81,11 @@ class Settings(BaseSettings):
     # ── 训练配置 ──────────────────────────────────────
     TRAIN_OUTPUT_DIR: str = "runs/train"  # 训练输出目录（模型权重、日志等）
     DATASET_BASE_DIR: str = "datasets"    # 数据集根目录
+    DEFAULT_MODEL_PATH: str = ""          # 默认模型权重路径（为空时使用 YOLOv11n 默认权重）
+
+    # ── ZIP 检测配置 ──────────────────────────────────
+    ZIP_MAX_SIZE_MB: int = 200       # ZIP 解压后最大总大小（MB）
+    ZIP_MAX_IMAGES: int = 100        # ZIP 中最多处理的图片数量
 
     # Fire/smoke inference configuration
     FIRE_SMOKE_MODEL_PATH: str = "runs/train/54/d63a63d7-e43b-4eee-a70b-7e9df0ed8f1a/train/weights/best.pt"
@@ -81,6 +100,10 @@ class Settings(BaseSettings):
 
     # ── 定时任务配置 ──────────────────────────────────
     SCHEDULER_ENABLED: bool = False       # 是否启用定时任务（如定时清理过期检测记录）
+
+    # ── WebSocket 配置 ───────────────────────────────
+    WEBSOCKET_MAX_CONNECTIONS: int = 10   # WebSocket 最大并发连接数
+    WEBSOCKET_IDLE_TIMEOUT: int = 60      # WebSocket 空闲超时（秒），超时自动断开
 
     # ── CORS 配置 ────────────────────────────────────
     ALLOWED_ORIGINS: str = (

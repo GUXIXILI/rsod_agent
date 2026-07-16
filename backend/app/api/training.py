@@ -128,7 +128,7 @@ def start_training(
 
     # 验证 data.yaml 存在
     # convert_voc.py 生成路径为 datasets/{scene_name}/yolo_dataset/data.yaml
-    data_yaml_path = os.path.join("datasets", scene.name, "yolo_dataset", "data.yaml")
+    data_yaml_path = os.path.join(settings.DATASET_BASE_DIR, scene.name, "yolo_dataset", "data.yaml")
     if not os.path.isfile(data_yaml_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -326,6 +326,41 @@ def stop_training(
         )
 
     return {"message": "训练已停止"}
+
+
+@router.delete("/{task_uuid}")
+def delete_training_task(
+    task_uuid: str,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    删除训练任务及其关联数据
+
+    仅允许删除非运行中（pending/running 之外）的任务。
+    删除操作会同时清理数据库记录和训练输出目录。
+    """
+    # 验证权限：任务必须属于当前用户
+    task = db.query(TrainingTask).filter(
+        TrainingTask.task_uuid == task_uuid
+    ).first()
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="训练任务不存在"
+        )
+    if task.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="无权操作此训练任务"
+        )
+
+    try:
+        result = training_service.delete_task(db, task_uuid)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
+
+    return {"code": 200, "message": "训练任务已删除", "data": result}
 
 
 @router.get("/results/{task_uuid}")
@@ -530,27 +565,27 @@ def validate_model(
     db: Session = Depends(get_db),
 ):
     """
-    评估模型（占位实现）。
+    评估模型：使用训练产出的 best.pt 对验证集进行评估
 
-    当前版本返回模拟评估结果，保证前端"评估模型"按钮可正常交互。
-    后续可替换为真实 model.val() 调用。
+    底层调用 training_service.validate_model()，执行 YOLO model.val()，
+    返回 precision、recall、mAP50、mAP50-95 及各类别 AP 指标。
     """
     _verify_training_task(db, task_uuid, current_user.id)
 
-    # 占位数据：基于 yubai 分支模型在验证集上的合理近似指标
-    return {
-        "split": payload.split,
-        "overall": {
-            "precision": 0.82,
-            "recall": 0.76,
-            "map50": 0.81,
-            "map50_95": 0.52,
-        },
-        "per_class": {
-            "fire": {"ap50": 0.84, "ap50_95": 0.55},
-            "smoke": {"ap50": 0.78, "ap50_95": 0.49},
-        },
-    }
+    try:
+        result = training_service.validate_model(
+            db=db,
+            task_uuid=task_uuid,
+            split=payload.split,
+            conf=payload.conf,
+            iou=payload.iou,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
+
+    return result
 
 
 @router.post("/export/{task_uuid}")
@@ -561,19 +596,38 @@ def export_model(
     db: Session = Depends(get_db),
 ):
     """
-    导出模型（占位实现）。
+    导出模型：将训练产出的 best.pt 导出为 ONNX 或 TorchScript 格式
 
-    当前版本返回导出成功信息，保证前端"导出模型"按钮可正常交互。
-    后续可替换为真实模型格式转换（ONNX/TensorRT 等）。
+    底层调用 training_service.export_model()，执行 YOLO model.export()，
+    返回导出文件路径、大小和下载链接。
     """
-    task = _verify_training_task(db, task_uuid, current_user.id)
-    model_path = _get_model_path()
+    _verify_training_task(db, task_uuid, current_user.id)
+
+    # 默认导出参数
+    export_format = "onnx"
+    device = "cpu"
+
+    try:
+        result = training_service.export_model(
+            db=db,
+            task_uuid=task_uuid,
+            export_format=export_format,
+            imgsz=640,
+            device=device,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        )
+
     return {
         "message": "模型导出成功",
         "task_uuid": task_uuid,
-        "format": "pt",
-        "model_path": str(model_path),
-        "download_url": f"/api/training/download/{task_uuid}",
+        "format": result["format"],
+        "file_name": result["file_name"],
+        "file_size": result["file_size"],
+        "model_path": result["file_path"],
+        "download_url": result["download_url"],
     }
 
 

@@ -4,13 +4,13 @@
 // 通过 vite.config.js 的 additionalData 自动注入到所有组件
 // ============================================================
 
-// 主题色系
-$primary-color: #409EFF;
-$primary-light: #66B1FF;
-$primary-dark: #3A8EE6;
+// 主题色系（火灾预警主题色系）
+$primary-color: #FF6B35;      // 橙色警示
+$primary-light: #FF8F5E;
+$primary-dark: #E55A2B;
 $success-color: #67C23A;
-$warning-color: #E6A23C;
-$danger-color: #F56C6C;
+$warning-color: #FF9800;      // 警告色
+$danger-color: #E53935;       // 危险色
 $info-color: #909399;
 
 // 文字颜色

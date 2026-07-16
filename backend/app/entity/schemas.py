@@ -8,7 +8,8 @@ Pydantic 请求/响应模型
   - List 模型：分页列表查询的参数和响应
 """
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Optional
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
@@ -89,6 +90,17 @@ class ChangePassword(BaseModel):
     """修改密码"""
     old_password: str = Field(..., description="旧密码")
     new_password: str = Field(..., min_length=6, max_length=100, description="新密码")
+
+
+class ForgotPasswordRequest(BaseModel):
+    """忘记密码请求"""
+    email: str = Field(..., description="用户邮箱")
+
+
+class ResetPasswordRequest(BaseModel):
+    """重置密码请求"""
+    token: str = Field(..., description="重置令牌")
+    new_password: str = Field(..., min_length=6, description="新密码")
 
 
 # --- 角色权限 ---
@@ -179,7 +191,7 @@ class DetectionTaskResponse(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime] = None
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 class DetectionResultResponse(BaseModel):
@@ -236,6 +248,8 @@ class TrainingTaskCreate(BaseModel):
     lr0: float = Field(default=0.01, description="初始学习率")
     augment_config: Optional[dict] = Field(None, description="数据增强配置")
 
+    model_config = {"protected_namespaces": ()}
+
 
 class TrainingTaskResponse(BaseModel):
     """训练任务响应"""
@@ -258,7 +272,7 @@ class TrainingTaskResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 class TrainingMetricResponse(BaseModel):
@@ -287,7 +301,7 @@ class ModelVersionBrief(BaseModel):
     is_default: bool
     created_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 class ModelVersionResponse(BaseModel):
@@ -312,7 +326,7 @@ class ModelVersionResponse(BaseModel):
     is_default: bool
     created_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 class ModelVersionCreate(BaseModel):
@@ -323,48 +337,14 @@ class ModelVersionCreate(BaseModel):
     model_type: str = Field(default="yolov11n", description="模型类型")
     description: Optional[str] = None
 
-
-class ModelEvaluationRequest(BaseModel):
-    """模型评估请求。"""
-    split: Literal["val", "test"] = "val"
-    imgsz: int = Field(default=640, ge=320, le=1280, multiple_of=32)
-    batch: int = Field(default=16, ge=1, le=64)
-    device: str = Field(default="cpu", pattern=r"^(cpu|\d+)$")
-
-
-class ModelEvaluationMetricsResponse(BaseModel):
-    """模型评估指标响应。"""
-    precision: float
-    recall: float
-    map50: float
-    map50_95: float
-    per_class_ap: dict[str, float]
-
-
-class ModelEvaluationResponse(BaseModel):
-    """模型评估响应。"""
-    model_version_id: int
-    metrics: ModelEvaluationMetricsResponse
-    artifacts: dict[str, str]
-
     model_config = {"protected_namespaces": ()}
 
 
-class ModelExportRequest(BaseModel):
-    """模型导出请求。"""
-    format: Literal["onnx", "torchscript"] = "onnx"
-    imgsz: int = Field(default=640, ge=320, le=1280, multiple_of=32)
-    device: str = Field(default="cpu", pattern=r"^(cpu|\d+)$")
-
-
-class ModelExportResponse(BaseModel):
-    """模型导出响应。"""
-    model_version_id: int
-    format: str
-    file_name: str
-    file_size: int
-
-    model_config = {"protected_namespaces": ()}
+class ModelPredictResponse(BaseModel):
+    """模型预测响应"""
+    status: str
+    detections: list = []
+    message: str = ""
 
 
 # ══════════════════════════════════════════════════════════════
@@ -393,6 +373,7 @@ class ChatMessageRequest(BaseModel):
     """发送消息请求"""
     session_id: Optional[int] = Field(None, description="会话 ID（为空则自动创建新会话）")
     content: str = Field(..., min_length=1, max_length=5000, description="消息内容")
+    image_path: Optional[str] = Field(None, description="快捷检测图片路径")
 
 
 class ChatMessageResponse(BaseModel):
@@ -489,6 +470,8 @@ class DetectionRequest(BaseModel):
     iou_threshold: float = Field(0.45, description="NMS 阈值")
     image_size: int = Field(640, description="推理图像尺寸")
 
+    model_config = {"protected_namespaces": ()}
+
 
 class FireLevelResult(BaseModel):
     """火情判定结果"""
@@ -512,3 +495,99 @@ class FireAlertResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ══════════════════════════════════════════════════════════════
+# 八、模型评估与导出（feature/model-evaluation-export-yubai）
+# ══════════════════════════════════════════════════════════════
+
+class ModelEvaluationRequest(BaseModel):
+    """模型评估请求。"""
+    split: Literal["val", "test"] = "val"
+    imgsz: int = Field(default=640, ge=320, le=1280, multiple_of=32)
+    batch: int = Field(default=16, ge=1, le=64)
+    device: str = Field(default="cpu", pattern=r"^(cpu|\d+)$")
+
+
+class ModelEvaluationMetricsResponse(BaseModel):
+    """模型评估指标响应。"""
+    precision: float
+    recall: float
+    map50: float
+    map50_95: float
+    per_class_ap: dict[str, float]
+
+
+class ModelEvaluationResponse(BaseModel):
+    """模型评估响应。"""
+    model_version_id: int
+    metrics: ModelEvaluationMetricsResponse
+    artifacts: dict[str, str]
+
+    model_config = {"protected_namespaces": ()}
+
+
+class ModelExportRequest(BaseModel):
+    """模型导出请求。"""
+    format: Literal["onnx", "torchscript"] = "onnx"
+    imgsz: int = Field(default=640, ge=320, le=1280, multiple_of=32)
+    device: str = Field(default="cpu", pattern=r"^(cpu|\d+)$")
+
+
+class ModelExportResponse(BaseModel):
+    """模型导出响应。"""
+    model_version_id: int
+    format: str
+    file_name: str
+    file_size: int
+
+    model_config = {"protected_namespaces": ()}
+
+
+# ══════════════════════════════════════════════════════════════
+# 九、管理员模块
+# ══════════════════════════════════════════════════════════════
+
+class UserStatusRequest(BaseModel):
+    """启用/禁用用户请求"""
+    is_active: bool = Field(..., description="是否启用用户")
+
+
+class ModelStatusRequest(BaseModel):
+    """切换模型状态请求"""
+    is_active: bool = Field(..., description="是否启用模型（True=active，False=archived）")
+
+
+class AdminUserItem(BaseModel):
+    """管理员用户列表项"""
+    id: int
+    username: str
+    email: str
+    phone: Optional[str] = None
+    avatar: Optional[str] = None
+    is_active: bool
+    is_superuser: bool
+    roles: list[str] = []
+    last_login_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AdminModelItem(BaseModel):
+    """管理员模型列表项"""
+    id: int
+    scene_id: int
+    scene_name: Optional[str] = None
+    training_task_id: Optional[int] = None
+    version: str
+    model_name: str
+    model_type: str
+    status: str
+    map50: Optional[float] = None
+    map50_95: Optional[float] = None
+    is_default: bool
+    file_size: Optional[int] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True, "protected_namespaces": ()}

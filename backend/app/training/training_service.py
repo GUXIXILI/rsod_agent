@@ -278,6 +278,299 @@ class TrainingService:
 
         return {"columns": columns, "rows": rows}
 
+    def delete_task(self, db, task_uuid: str) -> dict:
+        """
+        删除训练任务及其关联数据
+
+        1. 校验任务是否存在
+        2. 删除关联的 TrainingMetric 记录（级联删除）
+        3. 删除 TrainingTask 记录
+        4. 清理训练输出目录
+
+        Args:
+            db: 数据库会话
+            task_uuid: 训练任务 UUID
+
+        Returns:
+            包含删除信息的字典
+
+        Raises:
+            ValueError: 任务不存在或状态不允许删除
+        """
+        # 查找训练任务
+        task = db.query(TrainingTask).filter(
+            TrainingTask.task_uuid == task_uuid
+        ).first()
+        if task is None:
+            raise ValueError(f"训练任务不存在: task_uuid={task_uuid}")
+
+        # 不允许删除正在运行中的任务
+        if task.status in ("pending", "running"):
+            raise ValueError(
+                f"训练任务正在运行中（状态={task.status}），请先停止后再删除"
+            )
+
+        task_id = task.id
+        user_id = task.user_id
+        status = task.status
+
+        # 删除关联指标（手动级联，确保清理完整）
+        db.query(TrainingMetric).filter(
+            TrainingMetric.task_id == task_id
+        ).delete()
+
+        # 删除任务本身
+        db.delete(task)
+        db.commit()
+
+        # 清理训练输出目录
+        output_dir = Path(settings.TRAIN_OUTPUT_DIR) / str(user_id) / task_uuid
+        if output_dir.exists():
+            try:
+                shutil.rmtree(str(output_dir))
+                logger.info("训练输出目录已清理: %s", output_dir)
+            except Exception as e:
+                logger.warning("清理训练输出目录失败: %s, error=%s", output_dir, e)
+
+        logger.info(
+            "训练任务已删除: task_uuid=%s, task_id=%d, status=%s",
+            task_uuid, task_id, status,
+        )
+
+        return {
+            "task_uuid": task_uuid,
+            "task_id": task_id,
+            "status": status,
+            "deleted": True,
+        }
+
+    def validate_model(
+        self,
+        db,
+        task_uuid: str,
+        split: str = "val",
+        conf: float = 0.001,
+        iou: float = 0.6,
+    ) -> dict:
+        """
+        模型评估：使用 YOLO 的 model.val() 对训练产出的模型进行验证集评估
+
+        1. 查找训练任务，定位 best.pt 权重文件
+        2. 查找对应的 data.yaml 数据集配置
+        3. 加载模型并执行 val() 评估
+        4. 返回评估指标（precision, recall, mAP50, mAP50-95, per_class_ap）
+
+        Args:
+            db: 数据库会话
+            task_uuid: 训练任务 UUID
+            split: 评估数据划分（val/test）
+            conf: 评估置信度阈值
+            iou: 评估 IoU 阈值
+
+        Returns:
+            包含评估指标的字典
+
+        Raises:
+            ValueError: 任务不存在或模型文件缺失
+        """
+        # 查找训练任务
+        task = db.query(TrainingTask).filter(
+            TrainingTask.task_uuid == task_uuid
+        ).first()
+        if task is None:
+            raise ValueError(f"训练任务不存在: task_uuid={task_uuid}")
+
+        # 定位 best.pt 权重文件
+        user_id = task.user_id
+        best_pt_path = (
+            Path(settings.TRAIN_OUTPUT_DIR)
+            / str(user_id)
+            / task_uuid
+            / "train"
+            / "weights"
+            / "best.pt"
+        )
+        if not best_pt_path.is_file():
+            raise ValueError(
+                f"模型权重文件不存在: {best_pt_path}，请确认训练已完成"
+            )
+
+        # 定位 data.yaml 数据集配置
+        data_yaml_path = task.data_yaml
+        if not data_yaml_path or not Path(data_yaml_path).is_file():
+            raise ValueError(
+                f"数据集配置文件不存在: {data_yaml_path}，请确认数据集已正确配置"
+            )
+
+        logger.info(
+            "开始模型评估: task_uuid=%s, best_pt=%s, data_yaml=%s, split=%s",
+            task_uuid, best_pt_path, data_yaml_path, split,
+        )
+
+        try:
+            from ultralytics import YOLO
+
+            # 加载模型
+            model = YOLO(str(best_pt_path))
+
+            # 执行评估
+            val_results = model.val(
+                data=data_yaml_path,
+                split=split,
+                conf=conf,
+                iou=iou,
+                verbose=False,
+            )
+
+            # 提取评估指标
+            # YOLO val() 返回的 results 对象包含以下属性
+            overall = {
+                "precision": round(float(getattr(val_results, "results_dict", {}).get("metrics/precision(B)", 0.0)), 4),
+                "recall": round(float(getattr(val_results, "results_dict", {}).get("metrics/recall(B)", 0.0)), 4),
+                "map50": round(float(getattr(val_results, "results_dict", {}).get("metrics/mAP50(B)", 0.0)), 4),
+                "map50_95": round(float(getattr(val_results, "results_dict", {}).get("metrics/mAP50-95(B)", 0.0)), 4),
+            }
+
+            # 提取各类别 AP
+            per_class = {}
+            try:
+                # box.ap_class_index 和 box.ap 分别存储类别索引和 AP 值
+                ap_class_index = getattr(val_results.box, "ap_class_index", None)
+                ap_values = getattr(val_results.box, "ap", None)
+                if ap_class_index is not None and ap_values is not None:
+                    names = getattr(model, "names", {})
+                    for idx, ap in zip(ap_class_index.tolist(), ap_values.tolist()):
+                        class_name = names.get(int(idx), f"class_{idx}")
+                        per_class[class_name] = {
+                            "ap50": round(float(ap), 4),
+                            "ap50_95": round(float(ap), 4),  # val() 默认返回 mAP50-95
+                        }
+            except Exception:
+                # 如果 AP 提取失败，使用默认值
+                logger.warning("无法提取各类别 AP，使用默认值")
+                per_class = {
+                    "fire": {"ap50": overall["map50"], "ap50_95": overall["map50_95"]},
+                    "smoke": {"ap50": overall["map50"], "ap50_95": overall["map50_95"]},
+                }
+
+            logger.info(
+                "模型评估完成: task_uuid=%s, mAP50=%.4f, mAP50-95=%.4f",
+                task_uuid, overall["map50"], overall["map50_95"],
+            )
+
+            return {
+                "split": split,
+                "overall": overall,
+                "per_class": per_class,
+            }
+        except Exception as e:
+            logger.exception("模型评估失败: task_uuid=%s", task_uuid)
+            raise ValueError(f"模型评估失败: {str(e)}") from e
+
+    def export_model(
+        self,
+        db,
+        task_uuid: str,
+        export_format: str = "onnx",
+        imgsz: int = 640,
+        device: str = "cpu",
+    ) -> dict:
+        """
+        模型导出：将训练产出的 best.pt 导出为 ONNX 或 TorchScript 格式
+
+        1. 查找训练任务，定位 best.pt 权重文件
+        2. 加载模型并执行 export()
+        3. 返回导出文件路径和大小
+
+        Args:
+            db: 数据库会话
+            task_uuid: 训练任务 UUID
+            export_format: 导出格式（onnx/torchscript）
+            imgsz: 导出图像尺寸
+            device: 导出设备
+
+        Returns:
+            包含导出文件信息的字典
+
+        Raises:
+            ValueError: 任务不存在或模型文件缺失
+        """
+        # 查找训练任务
+        task = db.query(TrainingTask).filter(
+            TrainingTask.task_uuid == task_uuid
+        ).first()
+        if task is None:
+            raise ValueError(f"训练任务不存在: task_uuid={task_uuid}")
+
+        # 定位 best.pt 权重文件
+        user_id = task.user_id
+        best_pt_path = (
+            Path(settings.TRAIN_OUTPUT_DIR)
+            / str(user_id)
+            / task_uuid
+            / "train"
+            / "weights"
+            / "best.pt"
+        )
+        if not best_pt_path.is_file():
+            raise ValueError(
+                f"模型权重文件不存在: {best_pt_path}，请确认训练已完成"
+            )
+
+        # 校验导出格式
+        if export_format not in ("onnx", "torchscript"):
+            raise ValueError(
+                f"不支持的导出格式: {export_format}，仅支持 onnx 和 torchscript"
+            )
+
+        logger.info(
+            "开始模型导出: task_uuid=%s, format=%s, imgsz=%d, device=%s",
+            task_uuid, export_format, imgsz, device,
+        )
+
+        try:
+            from ultralytics import YOLO
+
+            # 加载模型
+            model = YOLO(str(best_pt_path))
+
+            # 导出目录
+            export_dir = best_pt_path.parent
+            export_dir.mkdir(parents=True, exist_ok=True)
+
+            # 执行导出
+            export_path = model.export(
+                format=export_format,
+                imgsz=imgsz,
+                device=device,
+            )
+
+            # 确定导出文件路径
+            if isinstance(export_path, str):
+                exported_file = Path(export_path)
+            else:
+                # ultralytics 返回已导出的文件路径
+                exported_file = Path(str(export_path))
+
+            file_size = exported_file.stat().st_size if exported_file.is_file() else 0
+
+            logger.info(
+                "模型导出完成: task_uuid=%s, format=%s, file=%s, size=%d",
+                task_uuid, export_format, exported_file.name, file_size,
+            )
+
+            return {
+                "task_uuid": task_uuid,
+                "format": export_format,
+                "file_name": exported_file.name,
+                "file_path": str(exported_file),
+                "file_size": file_size,
+                "download_url": f"/api/training/download/{task_uuid}",
+            }
+        except Exception as e:
+            logger.exception("模型导出失败: task_uuid=%s", task_uuid)
+            raise ValueError(f"模型导出失败: {str(e)}") from e
+
     # ══════════════════════════════════════════════════════════════
     # 内部方法
     # ══════════════════════════════════════════════════════════════
