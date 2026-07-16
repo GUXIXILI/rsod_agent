@@ -8,9 +8,9 @@ import { loginApi, registerApi, getUserInfoApi } from '@/api/auth'
 export const useUserStore = defineStore('user', {
   state: () => ({
     /** 访问令牌 */
-    token: localStorage.getItem('token') || '',
+    token: localStorage.getItem('rsod_token') || '',
     /** 刷新令牌 */
-    refreshToken: localStorage.getItem('refreshToken') || '',
+    refreshToken: localStorage.getItem('rsod_refresh_token') || '',
     /** 用户信息对象 */
     user: (() => {
       try {
@@ -57,8 +57,8 @@ export const useUserStore = defineStore('user', {
       this.user = user || {}
 
       // 持久化到 localStorage
-      localStorage.setItem('token', access_token)
-      localStorage.setItem('refreshToken', refresh_token || '')
+      localStorage.setItem('rsod_token', access_token)
+      localStorage.setItem('rsod_refresh_token', refresh_token || '')
       localStorage.setItem('user', JSON.stringify(user || {}))
     },
 
@@ -73,8 +73,8 @@ export const useUserStore = defineStore('user', {
       this.user = {}
 
       // 清除 localStorage
-      localStorage.removeItem('token')
-      localStorage.removeItem('refreshToken')
+      localStorage.removeItem('rsod_token')
+localStorage.removeItem('rsod_refresh_token')
       localStorage.removeItem('user')
     },
 

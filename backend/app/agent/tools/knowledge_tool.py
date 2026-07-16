@@ -5,18 +5,22 @@
 进行火灾烟雾检测相关知识的语义检索。
 
 在 LLM_STUB_MODE=true 时，knowledge_retriever 使用占位实现，
-返回模拟的检索结果；替换为真实 RAG 引擎后零修改即可运行。
+返回模拟的检索结果；否则使用 SemanticRetriever 接入真实的 RAG 管道。
+RAG 不可用时自动降级到 MOCK 知识库。
 """
+
+import asyncio
 
 from langchain_core.tools import tool
 
+from app.config.settings import settings
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════
-# 知识检索器（占位实现）
+# 知识检索器
 # ══════════════════════════════════════════════════════════════
 
 class KnowledgeRetriever:
@@ -24,8 +28,9 @@ class KnowledgeRetriever:
     知识检索器
 
     在 LLM_STUB_MODE=true 时使用占位实现，返回模拟检索结果。
-    替换为真实向量数据库（如 pgvector + embedding）后，只需修改此类
-    的 search 方法实现即可，tool 封装层无需任何改动。
+    在 LLM_STUB_MODE=false 时使用 SemanticRetriever 接入真实 RAG 管道
+    （embedding → pgvector → 语义检索）。
+    RAG 不可用时自动降级到 MOCK 知识库。
     """
 
     # 模拟知识库：火灾烟雾检测相关 FAQ
@@ -56,23 +61,32 @@ class KnowledgeRetriever:
         },
     ]
 
-    def search(self, query: str, top_k: int = 3) -> list[dict]:
-        """
-        检索与查询相关的知识条目。
+    def __init__(self):
+        """初始化知识检索器，延迟创建 SemanticRetriever 实例"""
+        self._semantic_retriever = None
 
-        当前为占位实现，使用简单的关键词匹配模拟检索。
-        替换为真实 RAG 引擎时，只需修改此方法即可。
+    def _get_semantic_retriever(self):
+        """延迟获取 SemanticRetriever 单例（避免启动时过早初始化数据库连接）"""
+        if self._semantic_retriever is None:
+            from app.rag.retriever import SemanticRetriever
+
+            self._semantic_retriever = SemanticRetriever()
+            logger.info("SemanticRetriever 已初始化（RAG 模式）")
+        return self._semantic_retriever
+
+    def _mock_search(self, query: str, top_k: int = 3) -> list[dict]:
+        """
+        MOCK 检索：使用关键词匹配模拟检索。
 
         Args:
-            query: 查询文本（用户问题或关键词）。
-            top_k: 返回的最大条目数，默认 3。
+            query: 查询文本
+            top_k: 返回的最大条目数
 
         Returns:
-            list[dict]: 检索结果列表，每项包含 question 和 answer 字段。
+            list[dict]: 检索结果列表，每项包含 question 和 answer 字段
         """
-        logger.info("知识检索（占位模式）: query=%s, top_k=%d", query, top_k)
+        logger.info("知识检索（MOCK 模式）: query=%s, top_k=%d", query, top_k)
 
-        # 简单的关键词匹配评分（兼容中英文）
         query_lower = query.lower()
         scored = []
         for item in self._MOCK_KNOWLEDGE_BASE:
@@ -93,9 +107,72 @@ class KnowledgeRetriever:
             if score > 0:
                 scored.append((score, item))
 
-        # 按评分降序排列，取 top_k
         scored.sort(key=lambda x: x[0], reverse=True)
         return [item for _, item in scored[:top_k]]
+
+    def _rag_search(self, query: str, top_k: int = 3) -> list[dict]:
+        """
+        通过 SemanticRetriever 进行真实 RAG 语义检索。
+
+        Args:
+            query: 查询文本
+            top_k: 返回的最大条目数
+
+        Returns:
+            list[dict]: 检索结果列表，每项包含 question 和 answer 字段
+        """
+        retriever = self._get_semantic_retriever()
+        result = retriever.search(query, top_k=top_k)
+
+        if result.get("status") != "success":
+            logger.warning(
+                "RAG 检索失败: %s，降级到 MOCK 知识库", result.get("message")
+            )
+            raise RuntimeError(result.get("message", "RAG 检索返回异常状态"))
+
+        rag_results = result.get("results", [])
+        if not rag_results:
+            logger.info("RAG 检索无结果: query=%s", query)
+            return []
+
+        # 转换 SemanticRetriever 结果格式为 knowledge_tool 统一格式
+        converted = []
+        for item in rag_results:
+            content = item.get("content", "")
+            metadata = item.get("metadata", {})
+            question = metadata.get("title", query)
+            converted.append({"question": question, "answer": content})
+
+        logger.info(
+            "RAG 检索成功: query=%s, 返回 %d 条结果", query, len(converted)
+        )
+        return converted
+
+    def search(self, query: str, top_k: int = 3) -> list[dict]:
+        """
+        检索与查询相关的知识条目。
+
+        在 LLM_STUB_MODE=true 时使用 MOCK 关键词匹配；
+        在 LLM_STUB_MODE=false 时使用 SemanticRetriever 进行语义检索。
+        RAG 不可用时自动降级到 MOCK 知识库。
+
+        Args:
+            query: 查询文本（用户问题或关键词）。
+            top_k: 返回的最大条目数，默认 3。
+
+        Returns:
+            list[dict]: 检索结果列表，每项包含 question 和 answer 字段。
+        """
+        # LLM_STUB_MODE 下直接使用 MOCK
+        if settings.LLM_STUB_MODE:
+            return self._mock_search(query, top_k)
+
+        # 非 stub 模式：尝试 RAG，失败则降级到 MOCK
+        try:
+            return self._rag_search(query, top_k)
+        except Exception as e:
+            logger.warning("RAG 检索异常，降级到 MOCK 知识库: %s", e)
+            return self._mock_search(query, top_k)
 
 
 # 全局单例
@@ -107,7 +184,7 @@ knowledge_retriever = KnowledgeRetriever()
 # ══════════════════════════════════════════════════════════════
 
 @tool
-def search_knowledge(query: str) -> str:
+async def search_knowledge(query: str) -> str:
     """检索火灾烟雾检测相关的专业知识。
 
     适用场景：用户询问火灾检测原理、模型特性、最佳实践等专业知识。
@@ -119,7 +196,11 @@ def search_knowledge(query: str) -> str:
         str: 检索到的知识内容，格式化的问答对。
     """
     try:
-        results = knowledge_retriever.search(query, top_k=3)
+        # 在独立线程中执行同步的 knowledge_retriever.search()，
+        # 避免阻塞事件循环（RAG 检索涉及数据库查询）
+        results = await asyncio.to_thread(
+            knowledge_retriever.search, query, top_k=3
+        )
 
         if not results:
             return (

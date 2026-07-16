@@ -93,7 +93,50 @@ class EmbeddingService:
 
     def _embed_via_qwen(self, texts: List[str]) -> List[List[float]]:
         """
-        通过通义千问 API 进行文本向量化
+        通过通义千问 API 进行文本向量化（使用 OpenAI 兼容 SDK 批量请求）
+
+        优先使用 OpenAI SDK 调用 DashScope 兼容接口，每批最多 20 条文本。
+        如果 openai 库不可用，自动降级为逐条 HTTP 请求方式。
+
+        Args:
+            texts: 文本列表
+
+        Returns:
+            List[List[float]]: 向量列表
+        """
+        api_key = getattr(settings, "QWEN_API_KEY", "")
+        if not api_key:
+            raise ValueError("QWEN_API_KEY 未配置，无法调用通义千问 Embedding API")
+
+        base_url = getattr(settings, "QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+        # 尝试使用 OpenAI 兼容 SDK 批量请求
+        try:
+            from openai import OpenAI
+        except ImportError:
+            # 降级：SDK 不可用时使用原有的逐条 HTTP 请求
+            return self._embed_via_qwen_http(texts)
+
+        if not hasattr(self, '_qwen_client') or self._qwen_client is None:
+            self._qwen_client = OpenAI(api_key=api_key, base_url=base_url)
+
+        embeddings = []
+        batch_size = 20
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            response = self._qwen_client.embeddings.create(
+                model=self.model,
+                input=batch,
+            )
+            embeddings.extend([item.embedding for item in response.data])
+
+        return embeddings
+
+    def _embed_via_qwen_http(self, texts: List[str]) -> List[List[float]]:
+        """
+        降级方案：逐条 HTTP 请求通义千问 Embedding API
+
+        仅在 openai SDK 不可用时使用。
 
         Args:
             texts: 文本列表
@@ -104,9 +147,6 @@ class EmbeddingService:
         import requests
 
         api_key = getattr(settings, "QWEN_API_KEY", "")
-        if not api_key:
-            raise ValueError("QWEN_API_KEY 未配置，无法调用通义千问 Embedding API")
-
         url = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
         headers = {
             "Authorization": f"Bearer {api_key}",
