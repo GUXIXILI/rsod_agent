@@ -17,14 +17,6 @@
         <span>智能对话</span>
       </el-menu-item>
 
-      <!-- 检测工作台 -->
-      <el-menu-item index="/detection">
-        <el-icon>
-          <Picture />
-        </el-icon>
-        <span>检测工作台</span>
-      </el-menu-item>
-
       <!-- 摄像头检测 -->
       <el-menu-item index="/camera-detection">
         <el-icon>
@@ -73,12 +65,11 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   ChatDotRound,
-  Picture,
-  VideoCamera,
   Cpu,
   Clock,
   DataAnalysis,
-  Setting
+  Setting,
+  VideoCamera
 } from '@element-plus/icons-vue'
 
 // 获取当前路由信息

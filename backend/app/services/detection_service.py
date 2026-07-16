@@ -587,10 +587,26 @@ class DetectionService:
                 "bbox": box.xyxy[0].tolist(),
             })
 
+        # 统计 fire 和 smoke 数量
+        fire_count = sum(1 for d in detections if d.get("class", "") == "fire")
+        smoke_count = sum(1 for d in detections if d.get("class", "") == "smoke")
+
+        # 火情等级判定
+        fire_level = ""
+        if fire_count >= 3:
+            fire_level = "danger"
+        elif fire_count >= 2:
+            fire_level = "warning"
+        elif fire_count >= 1:
+            fire_level = "notice"
+
         return {
             "annotated_frame": annotated_b64,
             "detections": detections,
             "total_objects": len(detections),
+            "fire_level": fire_level,
+            "fire_count": fire_count,
+            "smoke_count": smoke_count,
         }
 
     def _load_model(self, db: Optional[Session], scene_id: int):
@@ -636,6 +652,14 @@ class DetectionService:
             elif settings.DEFAULT_MODEL_PATH:
                 # 将 DEFAULT_MODEL_PATH 解析为绝对路径（相对于后端根目录）
                 model_path = Path(settings.DEFAULT_MODEL_PATH)
+                # 防御性兜底：如果 DEFAULT_MODEL_PATH 是通用 COCO 模型，自动切换到火灾烟雾专用模型
+                if model_path.name in ("yolo11n.pt", "yolov11n.pt"):
+                    fire_smoke_path = Path(settings.FIRE_SMOKE_MODEL_PATH)
+                    if not fire_smoke_path.is_absolute():
+                        fire_smoke_path = _BACKEND_ROOT / fire_smoke_path
+                    if fire_smoke_path.exists():
+                        logger.info("DEFAULT_MODEL_PATH 是通用模型，自动切换到火灾烟雾模型: %s", fire_smoke_path)
+                        model_path = fire_smoke_path
                 if not model_path.is_absolute():
                     model_path = _BACKEND_ROOT / model_path
                 if model_path.exists():

@@ -58,9 +58,12 @@ class Settings(BaseSettings):
     # ── RAG / Embedding 配置 ───────────────────────────
     # 向量化模型名称，支持 openai 或 qwen（通义千问）系列
     EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # Embedding API 独立配置（与对话 LLM 分离）
+    EMBEDDING_BASE_URL: str = ""
+    EMBEDDING_API_KEY: str = ""
     # OpenAI API Key（占位值，实际使用时需配置）
     OPENAI_API_KEY: str = ""
-    # 通义千问 API Key（占位值，实际使用时需配置）
+    # 通义千问 API Key（对话/Agent LLM 用）
     QWEN_API_KEY: str = ""
 
     # ── JWT 认证配置 ──────────────────────────────────
@@ -88,7 +91,7 @@ class Settings(BaseSettings):
     ZIP_MAX_IMAGES: int = 100        # ZIP 中最多处理的图片数量
 
     # Fire/smoke inference configuration
-    FIRE_SMOKE_MODEL_PATH: str = "runs/train/54/d63a63d7-e43b-4eee-a70b-7e9df0ed8f1a/train/weights/best.pt"
+    FIRE_SMOKE_MODEL_PATH: str = "models/fire_smoke_yolo11n_v1/best.pt"
     FIRE_SMOKE_DEVICE: str = "0"
     FIRE_SMOKE_IMAGE_FIRE_THRESHOLD: float = 0.25
     FIRE_SMOKE_IMAGE_SMOKE_THRESHOLD: float = 0.20

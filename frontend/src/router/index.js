@@ -43,22 +43,16 @@ const routes = [
     meta: { requiresAuth: true },
     children: [
       {
+        path: 'camera-detection',
+        name: 'CameraDetection',
+        component: () => import('@/views/CameraDetectionPage.vue'),
+        meta: { title: '摄像头检测' },
+      },
+      {
         path: 'chat',
         name: 'Chat',
         component: () => import('@/views/ChatPage.vue'),
         meta: { title: '智能对话' },
-      },
-      {
-        path: 'detection',
-        name: 'Detection',
-        component: () => import('@/views/DetectionPage.vue'),
-        meta: { title: '检测工作台' },
-      },
-      {
-        path: 'camera-detection',
-        name: 'CameraDetection',
-        component: () => import('@/views/CameraDetectionPage.vue'),
-        meta: { title: '摄像头检测', requiresAuth: true },
       },
       {
         path: 'training',

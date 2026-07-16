@@ -35,14 +35,42 @@ def detect_single_image(
     Returns:
         str: 检测结果摘要，包含检测到的火焰/烟雾目标数量、置信度、火情等级等信息。
     """
+    import os
+    import tempfile
+
+    # 标记是否为 URL 下载的临时文件（用于后续清理）
+    _tmp_file_path = None
+
     try:
-        # 读取图片文件
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
+        # ── URL 检测分支：如果 image_path 是 HTTP/HTTPS URL，先下载到临时文件 ──
+        if image_path.startswith(("http://", "https://")):
+            logger.info("检测到 URL 图片，开始下载: %s", image_path)
+            import requests
+            try:
+                response = requests.get(image_path, timeout=30)
+                response.raise_for_status()
+            except requests.RequestException as e:
+                return f"错误：无法下载图片 '{image_path}'，请确认 URL 是否可访问。（{str(e)}）"
 
-        import os
-        filename = os.path.basename(image_path)
+            # 将下载的图片写入临时文件（保留 .jpg 后缀以便 OpenCV 正确解码）
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmp.write(response.content)
+                _tmp_file_path = tmp.name
 
+            # 从临时文件读取图片字节
+            with open(_tmp_file_path, "rb") as f:
+                image_bytes = f.read()
+
+            # 从 URL 中提取文件名
+            filename = os.path.basename(image_path.split("?")[0]) or "downloaded_image.jpg"
+            logger.info("URL 图片下载成功，临时文件: %s, 大小: %d bytes", _tmp_file_path, len(image_bytes))
+        else:
+            # ── 原有本地文件路径分支 ──
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+            filename = os.path.basename(image_path)
+
+        # ── 公共检测逻辑（URL 和本地文件共用） ──
         from app.database.session import SessionLocal
         db = SessionLocal()
         try:
@@ -57,18 +85,31 @@ def detect_single_image(
                 iou_threshold=iou,
             )
 
+            # 查询检测结果详情（每个检测到的目标）
+            from app.entity.db_models import DetectionResult
+            detections = (
+                db.query(DetectionResult)
+                .filter(DetectionResult.task_id == task.id)
+                .all()
+            )
+
             # 构建检测结果摘要
             fire_count = task.fire_object_count or 0
             smoke_count = task.smoke_object_count or 0
+            total_count = fire_count + smoke_count
             fire_level = task.fire_level or "unknown"
+            inference_time = task.total_inference_time or 0
 
             result_lines = [
-                f"【单图检测结果】",
-                f"文件名：{filename}",
-                f"检测类别：fire（火焰）× {fire_count}，smoke（烟雾）× {smoke_count}",
-                f"火情等级：{fire_level}",
-                f"图片尺寸：{task.image_width}×{task.image_height}",
+                f"检测完成！共发现 {total_count} 个目标：",
             ]
+
+            # 逐条列出检测到的目标及置信度
+            for det in detections:
+                class_cn = getattr(det, "class_name_cn", None) or det.class_name
+                result_lines.append(f"- {class_cn}: 置信度 {det.confidence:.2f}")
+
+            result_lines.append(f"推理耗时: {inference_time:.0f}ms")
 
             if fire_level in ("warning", "danger"):
                 result_lines.append("⚠️ 警告：检测到火情，请立即关注并采取相应措施！")
@@ -85,6 +126,14 @@ def detect_single_image(
     except Exception as e:
         logger.exception("单图检测工具调用失败: image_path=%s", image_path)
         return f"单图检测失败：{str(e)}"
+    finally:
+        # 清理 URL 下载产生的临时文件
+        if _tmp_file_path and os.path.exists(_tmp_file_path):
+            try:
+                os.unlink(_tmp_file_path)
+                logger.info("已清理临时文件: %s", _tmp_file_path)
+            except Exception:
+                pass
 
 
 @tool

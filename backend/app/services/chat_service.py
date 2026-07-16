@@ -162,19 +162,45 @@ class ChatService:
         session_id: int,
         user_id: int,
         content: str,
+        files: list = None,
     ) -> dict:
         """
         发送消息并存储（集成 ReAct Agent 流程）
+        Args:
+            db: 数据库会话
+            session_id: 会话 ID
+            user_id: 用户 ID
+            content: 消息内容
+            files: 上传的文件列表（可选）
         Returns:
             包含 user_message 和 assistant_message 的字典
         """
         session = self._get_user_session(db, session_id, user_id)
 
+        # 构建存储到数据库的消息内容（包含图片 URL 信息，用于多轮对话记忆）
+        stored_content = content
+        if files:
+            file_hints = []
+            for f in files:
+                file_type = f.get("type", "file")
+                file_url = f.get("url", "")
+                file_name = f.get("name", "")
+                if file_type == "image":
+                    file_hints.append(f"[用户上传了图片: {file_url}]")
+                elif file_type == "zip":
+                    file_hints.append(f"[用户上传了ZIP压缩包: {file_url}]")
+                elif file_type == "video":
+                    file_hints.append(f"[用户上传了视频: {file_url}]")
+                else:
+                    file_hints.append(f"[用户上传了文件: {file_url} ({file_name})]")
+            if file_hints:
+                stored_content = "\n".join(file_hints) + "\n" + content
+
         # 存储用户消息
         user_msg = ChatMessage(
             session_id=session_id,
             role="user",
-            content=content,
+            content=stored_content,
         )
         db.add(user_msg)
         db.flush()
@@ -191,7 +217,7 @@ class ChatService:
 
         # AI 回复（通过 Agent 流程生成）
         reply_content, tool_calls, tool_result, tokens_used, latency_ms = self._run_agent(
-            content, history=history
+            content, history=history, files=files
         )
         assistant_msg = ChatMessage(
             session_id=session_id,
@@ -258,7 +284,7 @@ class ChatService:
     # Agent 核心逻辑
     # ══════════════════════════════════════════════════════════════
 
-    def _run_agent(self, content: str, history: list = None) -> tuple:
+    def _run_agent(self, content: str, history: list = None, files: list = None) -> tuple:
         """
         运行 Agent 流程，生成回复。
 
@@ -269,16 +295,17 @@ class ChatService:
         Args:
             content: 用户消息内容
             history: 历史消息列表
+            files: 上传的文件列表
 
         Returns:
             tuple: (回复内容, tool_calls列表, tool_result字符串, token数, 延迟毫秒数)
         """
         if settings.LLM_STUB_MODE:
-            return self._run_agent_stub(content, history)
+            return self._run_agent_stub(content, history, files)
         else:
             return self._run_agent_real(content, history)
 
-    def _run_agent_stub(self, content: str, history: list = None) -> tuple:
+    def _run_agent_stub(self, content: str, history: list = None, files: list = None) -> tuple:
         """
         Stub 模式：模拟 ReAct Agent 的思考→工具调用→回复流程。
 
@@ -286,12 +313,52 @@ class ChatService:
         1. 意图识别：根据关键词匹配确定用户意图
         2. 工具调用：模拟 Agent 选择合适的工具并执行
         3. 结果汇总：将工具返回结果格式化为自然语言回复
+
+        Args:
+            content: 用户消息内容
+            history: 历史消息列表
+            files: 上传的文件列表，每个文件包含 url/type/name 字段
         """
         start_time = time.time()
         tool_calls = []
         tool_result = ""
 
         normalized = content.strip()
+
+        # ── 优先处理：如果用户上传了图片且消息包含"检测"关键词，直接调用单图检测 ──
+        if files and self._has_image_file(files):
+            has_detect_keyword = any(
+                kw in normalized for kw in ["检测", "识别", "看看", "分析"]
+            )
+            if has_detect_keyword or not normalized:
+                # 提取第一个图片 URL
+                image_url = self._extract_first_image_url(files)
+                if image_url:
+                    tool_name = "detect_single_image"
+                    tool_args = {"image_path": image_url}
+                    tool_calls = [{"tool": tool_name, "args": tool_args}]
+
+                    logger.info(
+                        "Agent Stub: 检测到上传图片，直接调用单图检测, URL=%s",
+                        image_url,
+                    )
+
+                    try:
+                        tool_result = self._invoke_tool_stub(tool_name, tool_args)
+                    except Exception as e:
+                        logger.exception("Agent Stub 图片检测工具调用失败: %s", e)
+                        tool_result = f"工具调用失败：{str(e)}"
+
+                    reply = self._format_agent_response(
+                        user_message=normalized,
+                        tool_name=tool_name,
+                        tool_description="单图火焰烟雾检测",
+                        tool_result=tool_result,
+                    )
+
+                    latency_ms = int((time.time() - start_time) * 1000)
+                    tokens_used = max(1, (len(content) + len(reply) + len(tool_result)) // 2)
+                    return reply, tool_calls, tool_result, tokens_used, latency_ms
 
         # ── 步骤 1：意图识别 ──
         # 根据关键词匹配，找到最可能的工具意图
@@ -375,6 +442,42 @@ class ChatService:
     # ══════════════════════════════════════════════════════════════
     # Stub 模式辅助方法
     # ══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _has_image_file(files: list) -> bool:
+        """检查文件列表中是否包含图片类型文件"""
+        if not files:
+            return False
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            # 正常情况：前端应发 { url, type, name }
+            file_type = f.get("type")
+            if not file_type:
+                # 防御性兼容：前端忘记解包 res.data，发送了 { code, data: { url, type, name } }
+                file_type = f.get("data", {}).get("type")
+            if file_type == "image":
+                return True
+        return False
+
+    @staticmethod
+    def _extract_first_image_url(files: list) -> Optional[str]:
+        """从文件列表中提取第一个图片文件的 URL"""
+        if not files:
+            return None
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            # 正常情况：前端应发 { url, type, name }
+            file_type = f.get("type")
+            if not file_type:
+                # 防御性兼容：前端忘记解包 res.data，发送了 { code, data: { url, type, name } }
+                file_type = f.get("data", {}).get("type")
+            if file_type == "image":
+                url = f.get("url") or f.get("data", {}).get("url", "")
+                if url:
+                    return url
+        return None
 
     def _match_intent(self, content: str) -> Optional[dict]:
         """
@@ -583,11 +686,29 @@ class ChatService:
             else:
                 session = self.create_session(db, user_id)
 
+            # 构建消息内容（如果包含文件，注入文件信息提示）
+            agent_content = data.content
+            if data.files:
+                file_hints = []
+                for f in data.files:
+                    file_type = f.get("type", "file")
+                    file_url = f.get("url", "")
+                    file_name = f.get("name", "")
+                    if file_type == "image":
+                        file_hints.append(f"用户上传了图片: {file_url}，请检测这张图片")
+                    elif file_type == "zip":
+                        file_hints.append(f"用户上传了ZIP压缩包: {file_url}，请检测压缩包中的图片")
+                    elif file_type == "video":
+                        file_hints.append(f"用户上传了视频: {file_url}，请检测该视频")
+                    else:
+                        file_hints.append(f"用户上传了文件: {file_url}（{file_name}）")
+                agent_content = "\n".join(file_hints) + "\n" + data.content
+
             # 存储用户消息
             user_msg = ChatMessage(
                 session_id=session.id,
                 role="user",
-                content=data.content,
+                content=agent_content,
                 agent_used="user",
             )
             db.add(user_msg)
@@ -623,50 +744,101 @@ class ChatService:
                 yield f"event: token\ndata: {json.dumps({'content': thinking_content}, ensure_ascii=False)}\n\n"
 
                 # 意图识别
-                normalized = data.content.strip()
-                matched_tool = self._match_intent(normalized)
+                normalized = agent_content.strip()
                 tool_calls = []
                 tool_result = ""
 
-                if matched_tool:
-                    tool_name = matched_tool["name"]
-                    tool_args = self._extract_tool_args_from_stub(normalized, tool_name)
-                    tool_calls = [{"tool": tool_name, "args": tool_args}]
-
-                    # 发送工具开始事件（tool_start 新事件名，保留 tool_call 向后兼容）
-                    tool_start_data = {'tool': tool_name, 'args': tool_args}
-                    yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
-                    yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
-
-                    try:
-                        tool_result = self._invoke_tool_stub(tool_name, tool_args)
-                    except Exception as e:
-                        logger.exception("SSE Stub 工具调用失败: tool=%s", tool_name)
-                        tool_result = f"工具调用失败：{str(e)}"
-
-                    # 发送工具结束事件（tool_end 新事件名）
-                    tool_end_data = {'tool': tool_name, 'result': str(tool_result)[:500]}
-                    yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
-
-                    # 发送工具结果事件（text_chunk 新事件名，保留 token 向后兼容）
-                    nl = "\n\n"
-                    result_content = nl + tool_result
-                    yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
-                    yield f"event: token\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
-
-                    full_content = self._format_agent_response(
-                        user_message=normalized,
-                        tool_name=tool_name,
-                        tool_description=matched_tool["description"],
-                        tool_result=tool_result,
+                # ── 优先处理：如果用户上传了图片且消息包含"检测"关键词，直接调用单图检测 ──
+                files = data.files
+                image_detected = False
+                if files and self._has_image_file(files):
+                    has_detect_keyword = any(
+                        kw in normalized for kw in ["检测", "识别", "看看", "分析"]
                     )
-                else:
-                    full_content = self._build_stub_reply(normalized, history)
-                    # 流式输出回复内容（text_chunk 新事件名，保留 token 向后兼容）
-                    for offset in range(0, len(full_content), 8):
-                        chunk = full_content[offset : offset + 8]
-                        yield f"event: text_chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
-                        yield f"event: token\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+                    if has_detect_keyword or not data.content.strip():
+                        # 提取第一个图片 URL，直接调用单图检测
+                        image_url = self._extract_first_image_url(files)
+                        if image_url:
+                            tool_name = "detect_single_image"
+                            tool_args = {"image_path": image_url}
+                            tool_calls = [{"tool": tool_name, "args": tool_args}]
+
+                            logger.info(
+                                "SSE Stub: 检测到上传图片，直接调用单图检测, URL=%s",
+                                image_url,
+                            )
+
+                            # 发送工具开始事件
+                            tool_start_data = {'tool': tool_name, 'args': tool_args}
+                            yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+                            yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+
+                            try:
+                                tool_result = self._invoke_tool_stub(tool_name, tool_args)
+                            except Exception as e:
+                                logger.exception("SSE Stub 图片检测工具调用失败: %s", e)
+                                tool_result = f"工具调用失败：{str(e)}"
+
+                            # 发送工具结束事件
+                            tool_end_data = {'tool': tool_name, 'result': str(tool_result)[:500]}
+                            yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+
+                            # 发送工具结果事件
+                            nl = "\n\n"
+                            result_content = nl + tool_result
+                            yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
+                            yield f"event: token\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
+
+                            full_content = self._format_agent_response(
+                                user_message=normalized,
+                                tool_name=tool_name,
+                                tool_description="单图火焰烟雾检测",
+                                tool_result=tool_result,
+                            )
+                            image_detected = True
+
+                if not image_detected:
+                    matched_tool = self._match_intent(normalized)
+
+                    if matched_tool:
+                        tool_name = matched_tool["name"]
+                        tool_args = self._extract_tool_args_from_stub(normalized, tool_name)
+                        tool_calls = [{"tool": tool_name, "args": tool_args}]
+
+                        # 发送工具开始事件（tool_start 新事件名，保留 tool_call 向后兼容）
+                        tool_start_data = {'tool': tool_name, 'args': tool_args}
+                        yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+                        yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+
+                        try:
+                            tool_result = self._invoke_tool_stub(tool_name, tool_args)
+                        except Exception as e:
+                            logger.exception("SSE Stub 工具调用失败: tool=%s", tool_name)
+                            tool_result = f"工具调用失败：{str(e)}"
+
+                        # 发送工具结束事件（tool_end 新事件名）
+                        tool_end_data = {'tool': tool_name, 'result': str(tool_result)[:500]}
+                        yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+
+                        # 发送工具结果事件（text_chunk 新事件名，保留 token 向后兼容）
+                        nl = "\n\n"
+                        result_content = nl + tool_result
+                        yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
+                        yield f"event: token\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
+
+                        full_content = self._format_agent_response(
+                            user_message=normalized,
+                            tool_name=tool_name,
+                            tool_description=matched_tool["description"],
+                            tool_result=tool_result,
+                        )
+                    else:
+                        full_content = self._build_stub_reply(normalized, history)
+                        # 流式输出回复内容（text_chunk 新事件名，保留 token 向后兼容）
+                        for offset in range(0, len(full_content), 8):
+                            chunk = full_content[offset : offset + 8]
+                            yield f"event: text_chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+                            yield f"event: token\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
             else:
                 # ── 真实模式：复用 DetectionAgent 单例流式输出 ──
                 try:
@@ -677,7 +849,7 @@ class ChatService:
                     tool_calls = []
                     tool_result = ""
 
-                    async for event in detection_agent.chat_stream(data.content, history):
+                    async for event in detection_agent.chat_stream(agent_content, history):
                         event_type = event.get("type", "")
 
                         if event_type == "text_chunk":
@@ -741,8 +913,9 @@ class ChatService:
             db.commit()
             db.refresh(assistant_msg)
 
-            # 发送 done 事件
+            # 发送 done 事件，包含 session_id 以便前端自动关联新会话
             done_data = {
+                "session_id": session.id,
                 "tokens_used": tokens_used,
                 "latency_ms": latency_ms,
                 "message_id": assistant_msg.id,

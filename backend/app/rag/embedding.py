@@ -104,11 +104,12 @@ class EmbeddingService:
         Returns:
             List[List[float]]: 向量列表
         """
-        api_key = getattr(settings, "QWEN_API_KEY", "")
+        api_key = getattr(settings, "EMBEDDING_API_KEY", "")
         if not api_key:
-            raise ValueError("QWEN_API_KEY 未配置，无法调用通义千问 Embedding API")
+            raise ValueError("EMBEDDING_API_KEY 未配置，无法调用 Embedding API")
 
-        base_url = getattr(settings, "QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        base_url = getattr(settings, "EMBEDDING_BASE_URL", "")
+        # 使用独立的 Embedding API 配置（与对话 LLM 分离）
 
         # 尝试使用 OpenAI 兼容 SDK 批量请求
         try:
@@ -146,7 +147,7 @@ class EmbeddingService:
         """
         import requests
 
-        api_key = getattr(settings, "QWEN_API_KEY", "")
+        api_key = getattr(settings, "EMBEDDING_API_KEY", "")
         url = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -188,10 +189,9 @@ class EmbeddingService:
             return [self._hash_to_vector(text) for text in texts]
 
         # 正常模式：调用远程 Embedding API
-        if "qwen" in self.model.lower() or "tongyi" in self.model.lower():
-            return self._embed_via_qwen(texts)
-        else:
-            return self._embed_via_openai(texts)
+        # 当前项目复用 QWEN 配置（BASE_URL + API_KEY）调用所有 Embedding 模型，
+        # 包括 baai/bge-m3、nvidia/nv-embed-v1 等，统一走 OpenAI 兼容接口。
+        return self._embed_via_qwen(texts)
 
     def embed_query(self, query: str) -> List[float]:
         """

@@ -14,6 +14,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config.settings import settings
 from app.core.logger import get_logger
+from app.database.session import SessionLocal
+from app.entity.db_models import FireAlert
 from app.services.detection_service import detection_service
 
 logger = get_logger(__name__)
@@ -58,6 +60,9 @@ async def camera_websocket(websocket: WebSocket):
     fps_start = time.time()
     fps = 0.0
 
+    # 火情预警状态跟踪（避免每一帧都写入）
+    last_fire_level = "safe"
+
     try:
         while True:
             # ── Idle 超时：60 秒无帧自动断开 ─────────────────────────────────
@@ -94,8 +99,8 @@ async def camera_websocket(websocket: WebSocket):
                 else:
                     device = "cpu"
                     # CPU 模式自动降低 image_size 加速推理
-                    if image_size > 416:
-                        image_size = 416
+                    if image_size > 320:
+                        image_size = 320
 
                 logger.info(
                     "WebSocket config: mode=%s, device=%s, conf=%.2f, "
@@ -114,10 +119,10 @@ async def camera_websocket(websocket: WebSocket):
                     warmed_up = True
                     logger.info("模型预热完成")
                 except Exception as e:
-                    logger.error("模型预热失败: error=%s", e)
-                    await websocket.send_json({"type": "error", "message": f"warmup failed: {e}"})
-                    continue
+                    logger.warning("模型预热失败（将使用非预热模式）: error=%s", e)
+                    warmed_up = False  # 预热失败，但仍允许帧检测
 
+                # 无论预热是否成功，都发送 config_ok
                 await websocket.send_json({
                     "type": "config_ok",
                     "device": device,
@@ -127,13 +132,6 @@ async def camera_websocket(websocket: WebSocket):
 
             # ── Frame 消息：接收帧 → 推理 → 回传结果 ─────────────────────────
             elif msg_type == "frame":
-                if not warmed_up:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "not configured, send config first",
-                    })
-                    continue
-
                 frame_b64 = msg.get("data", "")
                 if not frame_b64:
                     await websocket.send_json({"type": "error", "message": "empty frame data"})
@@ -168,6 +166,36 @@ async def camera_websocket(websocket: WebSocket):
                 result["fps"] = round(fps, 1)
                 result["inference_time"] = inference_ms
                 await websocket.send_json(result)
+
+                # 检测到火情时写入预警表（仅火情等级变化时写入一次）
+                fire_level = result.get("fire_level", "")
+                if fire_level != last_fire_level and fire_level in ("notice", "warning", "danger"):
+                    last_fire_level = fire_level
+                    db = SessionLocal()
+                    try:
+                        alert = FireAlert(
+                            task_id=0,  # 摄像头检测无固定 task_id
+                            scene_id=scene_id,
+                            fire_level=fire_level,
+                            content=f"摄像头实时检测到火情：{fire_level}",
+                            suggestion=f"检测到{fire_level}级别火情，请立即确认现场情况",
+                            channels=["websocket"],
+                            push_status="dispatched",
+                        )
+                        db.add(alert)
+                        db.commit()
+                        # 将预警信息附加到 result 中回传给前端
+                        result["alert"] = {
+                            "fire_level": fire_level,
+                            "content": alert.content,
+                            "suggestion": alert.suggestion,
+                        }
+                        logger.info("火情预警已写入: fire_level=%s, scene_id=%s", fire_level, scene_id)
+                    except Exception as e:
+                        db.rollback()
+                        logger.error("写入火情预警失败: %s", e)
+                    finally:
+                        db.close()
 
             else:
                 await websocket.send_json({

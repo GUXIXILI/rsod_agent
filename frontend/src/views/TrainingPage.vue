@@ -71,7 +71,7 @@
               size="small"
               type="danger"
               text
-              @click="stopTask(row.id)"
+              @click="stopTask(row.task_uuid)"
             >
               停止
             </el-button>
@@ -579,7 +579,7 @@ async function fetchTasks() {
   loadingTasks.value = true;
   try {
     const res = await request.get("/training/tasks");
-    taskList.value = res.items || [];
+    taskList.value = Array.isArray(res) ? res : (res.items || []);
   } catch (e) {
     console.error("获取任务列表失败", e);
   } finally {
@@ -619,7 +619,7 @@ async function fetchMetrics() {
   try {
     const taskId = selectedTask.value.task_uuid;
     const res = await request.get(`/training/metrics/${taskId}`);
-    const metrics = res.metrics || [];
+    const metrics = Array.isArray(res) ? res : (res.metrics || []);
 
     // 更新任务状态
     const statusRes = await request.get(`/training/status/${taskId}`);
@@ -627,16 +627,14 @@ async function fetchMetrics() {
       selectedTask.value = { ...selectedTask.value, ...statusRes };
 
       // 同步更新任务列表中的进度（进度条 + Epoch 显示）
-      if (statusRes.task) {
-        const idx = taskList.value.findIndex((t) => t.id === statusRes.task.id);
-        if (idx !== -1) {
-          taskList.value[idx] = {
-            ...taskList.value[idx],
-            progress: statusRes.task.progress,
-            current_epoch: statusRes.task.current_epoch,
-            status: statusRes.task.status,
-          };
-        }
+      const idx = taskList.value.findIndex((t) => t.id === statusRes.id);
+      if (idx !== -1) {
+        taskList.value[idx] = {
+          ...taskList.value[idx],
+          progress: statusRes.progress,
+          current_epoch: statusRes.current_epoch,
+          status: statusRes.status,
+        };
       }
     }
 

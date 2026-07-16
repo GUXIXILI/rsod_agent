@@ -99,7 +99,7 @@ def start_training(
         .filter(
             TrainingTask.scene_id == task_data.scene_id,
             TrainingTask.user_id == current_user.id,
-            TrainingTask.status.in_(["pending", "running"]),
+            TrainingTask.status == "running",
         )
         .first()
     )

@@ -11,15 +11,15 @@ import request from "@/utils/request";
  * @param {number} [sceneId=1] - 场景 ID（默认 1）
  * @returns {Promise} - 检测结果（标注图 + 目标统计）
  */
-export function detectSingle(formData, sceneId = 1) {
+export async function detectSingle(formData, sceneId = 1) {
   // 后端要求 scene_id 为 Form 字段，追加到 FormData
   if (!formData.has("scene_id")) {
     formData.append("scene_id", sceneId);
   }
   // 不设置 Content-Type，让 axios 自动添加 multipart/form-data + boundary
-  return request.post("/detection/single", formData, {
+  return (await request.post("/detection/single", formData, {
     timeout: 60000,
-  });
+  })).data;
 }
 
 /**
@@ -28,13 +28,13 @@ export function detectSingle(formData, sceneId = 1) {
  * @param {number} [sceneId=1] - 场景 ID（默认 1）
  * @returns {Promise} - 批量检测结果
  */
-export function detectBatch(formData, sceneId = 1) {
+export async function detectBatch(formData, sceneId = 1) {
   if (!formData.has("scene_id")) {
     formData.append("scene_id", sceneId);
   }
-  return request.post("/detection/batch", formData, {
+  return (await request.post("/detection/batch", formData, {
     timeout: 120000,
-  });
+  })).data;
 }
 
 /**
@@ -43,13 +43,13 @@ export function detectBatch(formData, sceneId = 1) {
  * @param {number} [sceneId=1] - 场景 ID（默认 1）
  * @returns {Promise} - ZIP 解压后的批量检测结果
  */
-export function detectZip(formData, sceneId = 1) {
+export async function detectZip(formData, sceneId = 1) {
   if (!formData.has("scene_id")) {
     formData.append("scene_id", sceneId);
   }
-  return request.post("/detection/zip", formData, {
+  return (await request.post("/detection/zip", formData, {
     timeout: 180000,
-  });
+  })).data;
 }
 
 /**

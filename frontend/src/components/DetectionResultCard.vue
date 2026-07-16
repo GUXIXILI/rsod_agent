@@ -4,7 +4,7 @@
       <el-icon><DataAnalysis /></el-icon>
       <span>检测结果</span>
       <el-tag size="small" type="success">
-        {{ result.total_objects ?? 0 }} 个目标
+        {{ totalObjects }} 个目标
       </el-tag>
     </div>
 
@@ -40,7 +40,7 @@
           <el-tag type="info">时长: {{ result.duration_seconds }}s</el-tag>
           <el-tag type="info">FPS: {{ result.fps }}</el-tag>
           <el-tag type="info">采样帧: {{ result.processed_frames }}</el-tag>
-          <el-tag type="success">目标: {{ result.total_objects }}</el-tag>
+          <el-tag type="success">目标: {{ totalObjects }}</el-tag>
         </div>
         <div v-if="result.annotated_video_url" class="video-player">
           <video
@@ -79,7 +79,7 @@
         </div>
         <div class="stat-item">
           <span class="stat-label">检测目标</span>
-          <span class="stat-value">{{ result.total_objects ?? 0 }} 个</span>
+          <span class="stat-value">{{ totalObjects }} 个</span>
         </div>
         <div class="stat-item" v-if="isBatch">
           <span class="stat-label">图片数量</span>
@@ -176,9 +176,16 @@ function previewVideoFrame(frame) {
   showFullImage.value = true;
 }
 
-/** 类别统计转为数组（用于 el-table） */
+/** 目标总数（兼容多种后端字段名） */
+const totalObjects = computed(() => {
+  return props.result.total_objects
+    ?? (props.result.fire_object_count || 0) + (props.result.smoke_object_count || 0)
+    ?? 0;
+});
+
+/** 类别统计转为数组（用于 el-table，兼容 data.class_counts） */
 const classCountsArray = computed(() => {
-  const counts = props.result.class_counts || {};
+  const counts = props.result.class_counts || props.result.data?.class_counts || {};
   return Object.entries(counts).map(([className, count]) => ({
     className,
     count,

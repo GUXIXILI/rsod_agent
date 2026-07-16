@@ -1,16 +1,17 @@
 import { defineStore } from 'pinia'
+import request from '@/utils/request'
 
 /**
  * 智能体状态管理 Store
- * 管理会话、消息和 SSE 连接状态
+ * 管理会话、消息和 SSE 连接状态，与后端 API 同步
  */
 export const useAgentStore = defineStore('agent', {
   state: () => ({
-    /** 当前会话 ID */
+    /** 当前会话 ID（后端主键，整数） */
     currentSessionId: null,
-    /** 会话列表，每项 { id, title, created_at, messages[] } */
+    /** 会话列表，每项来自后端 { id, title, created_at, message_count, last_message_at, ... } */
     sessions: [],
-    /** 当前会话的消息列表，每项 { role, content, timestamp, loading, error, detectionResult, toolCall, toolCalls, thinking } */
+    /** 当前会话的消息列表，每项 { role, content, timestamp, loading, error, detectionResult, toolCalls, thinking } */
     messages: [],
     /** 是否正在等待 AI 回复 */
     isLoading: false,
@@ -19,67 +20,141 @@ export const useAgentStore = defineStore('agent', {
   }),
 
   actions: {
+    // ══════════════════════════════════════════════════════════════
+    // 会话管理（与后端 API 同步）
+    // ══════════════════════════════════════════════════════════════
+
     /**
-     * 创建新会话
-     * 保存当前会话到列表，清空消息列表，生成新的会话 ID
+     * 从后端加载会话列表（分页）
+     * GET /api/chat/sessions → { code, message, data: { items, total, skip, limit } }
+     * 响应拦截器已解包 response.data，所以 res 直接是 { code, message, data }
+     */
+    async fetchSessions() {
+      try {
+        const res = await request.get('/chat/sessions')
+        this.sessions = res.data?.items || []
+      } catch (err) {
+        console.error('获取会话列表失败:', err)
+      }
+    },
+
+    /**
+     * 从后端加载指定会话的消息历史
+     * GET /api/chat/sessions/{id}/messages → { code, message, data: [...] }
+     */
+    async loadSessionMessages(sessionId) {
+      this.currentSessionId = sessionId
+      this.messages = []
+      try {
+        const res = await request.get(`/chat/sessions/${sessionId}/messages`)
+        const rawMessages = res.data || []
+        this.messages = rawMessages.map(m => this._transformMessage(m))
+      } catch (err) {
+        console.error('加载会话消息失败:', err)
+        this.messages = []
+      }
+    },
+
+    /**
+     * 删除会话（含消息级联删除）
+     * DELETE /api/chat/sessions/{id}
+     */
+    async deleteSession(sessionId) {
+      try {
+        await request.delete(`/chat/sessions/${sessionId}`)
+        this.sessions = this.sessions.filter(s => s.id !== sessionId)
+        if (this.currentSessionId === sessionId) {
+          this.newChat()
+        }
+      } catch (err) {
+        console.error('删除会话失败:', err)
+      }
+    },
+
+    /**
+     * 重命名会话
+     * PATCH /api/chat/sessions/{id}
+     * @param {number} sessionId - 会话 ID
+     * @param {string} title - 新标题
+     */
+    async renameSession(sessionId, title) {
+      try {
+        await request.patch(`/chat/sessions/${sessionId}`, { title })
+        const session = this.sessions.find(s => s.id === sessionId)
+        if (session) {
+          session.title = title
+        }
+      } catch (err) {
+        console.error('重命名会话失败:', err)
+        throw err
+      }
+    },
+
+    /**
+     * 创建新会话（仅重置前端状态，不调用后端创建）
+     * 后端会在用户发送第一条消息时自动创建会话
      */
     newChat() {
-      // 保存当前会话（如果有消息）
-      if (this.currentSessionId && this.messages.length > 0) {
-        this._saveCurrentSession()
-      }
-      this.currentSessionId = Date.now().toString()
+      this.abort()
+      this.currentSessionId = null
       this.messages = []
       this.isLoading = false
-      // 若有正在进行的请求，先中断
-      this.abort()
     },
 
     /**
-     * 切换会话
-     * @param {string} sessionId - 目标会话 ID
+     * 切换会话：从后端加载目标会话的消息历史
+     * @param {number} sessionId - 目标会话 ID
      */
-    switchSession(sessionId) {
+    async switchSession(sessionId) {
       if (sessionId === this.currentSessionId) return
-      // 保存当前会话
-      this._saveCurrentSession()
-      // 加载目标会话
-      const session = this.sessions.find(s => s.id === sessionId)
-      if (session) {
-        this.currentSessionId = session.id
-        this.messages = session.messages || []
+      this.abort()
+      await this.loadSessionMessages(sessionId)
+      this.isLoading = false
+    },
+
+    // ══════════════════════════════════════════════════════════════
+    // 消息管理
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * 将后端消息格式转换为前端消息格式
+     */
+    _transformMessage(m) {
+      return {
+        role: m.role,
+        content: m.content || '',
+        timestamp: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
+        toolCalls: this._parseToolCalls(m.tool_calls),
+        detectionResult: this._parseDetectionResult(m.tool_result),
+        loading: false,
+        thinking: false,
+        error: false,
       }
     },
 
     /**
-     * 内部方法：保存当前会话到列表
+     * 解析工具调用列表（后端存储为 JSON 字符串或 None）
      */
-    _saveCurrentSession() {
-      if (!this.currentSessionId || this.messages.length === 0) return
-      const idx = this.sessions.findIndex(s => s.id === this.currentSessionId)
-      const title = this._generateSessionTitle()
-      const sessionData = {
-        id: this.currentSessionId,
-        title,
-        created_at: this.messages[0]?.timestamp || Date.now(),
-        messages: [...this.messages]
+    _parseToolCalls(toolCalls) {
+      if (!toolCalls) return []
+      if (typeof toolCalls === 'string') {
+        try { return JSON.parse(toolCalls) } catch { return [] }
       }
-      if (idx >= 0) {
-        this.sessions[idx] = sessionData
-      } else {
-        this.sessions.unshift(sessionData)
-      }
+      return Array.isArray(toolCalls) ? toolCalls : []
     },
 
     /**
-     * 内部方法：根据首条用户消息生成会话标题
+     * 解析检测结果（从 tool_result 中提取包含 detections 的 JSON）
      */
-    _generateSessionTitle() {
-      const firstUser = this.messages.find(m => m.role === 'user')
-      if (firstUser && firstUser.content) {
-        return firstUser.content.substring(0, 30) + (firstUser.content.length > 30 ? '...' : '')
+    _parseDetectionResult(toolResult) {
+      if (!toolResult) return null
+      try {
+        const parsed = typeof toolResult === 'string' ? JSON.parse(toolResult) : toolResult
+        if (parsed && parsed.detections) return parsed
+        return null
+      } catch {
+        return null
       }
-      return '新对话'
     },
 
     /**
@@ -102,7 +177,6 @@ export const useAgentStore = defineStore('agent', {
       for (let i = msgs.length - 1; i >= 0; i--) {
         if (msgs[i].role === 'assistant') {
           msgs[i].content = content
-          // 有内容时自动取消 loading 状态
           if (content && content.length > 0) {
             msgs[i].loading = false
           }

@@ -284,6 +284,7 @@ async def detect_single(
                 "fire_level": task.fire_level,
                 "fire_object_count": task.fire_object_count,
                 "smoke_object_count": task.smoke_object_count,
+                "total_objects": task.fire_object_count + task.smoke_object_count,
                 "annotated_url": task.annotated_url,
                 "inference_time": task.total_inference_time or 0,
                 "class_counts": {
@@ -339,6 +340,7 @@ async def detect_batch(
             "message": "批量检测完成",
             "data": {
                 "total": len(tasks),
+                "total_objects": sum((t.fire_object_count or 0) + (t.smoke_object_count or 0) for t in tasks),
                 "tasks": [
                     {
                         "task_id": t.id,

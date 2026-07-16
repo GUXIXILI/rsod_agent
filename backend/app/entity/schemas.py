@@ -8,7 +8,7 @@ Pydantic 请求/响应模型
   - List 模型：分页列表查询的参数和响应
 """
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from typing import Literal
 from pydantic import BaseModel, Field
 
@@ -372,8 +372,9 @@ class ChatSessionResponse(BaseModel):
 class ChatMessageRequest(BaseModel):
     """发送消息请求"""
     session_id: Optional[int] = Field(None, description="会话 ID（为空则自动创建新会话）")
-    content: str = Field(..., min_length=1, max_length=5000, description="消息内容")
+    content: str = Field(default="", min_length=0, max_length=5000, description="消息内容")
     image_path: Optional[str] = Field(None, description="快捷检测图片路径")
+    files: Optional[List[dict]] = Field(None, description="上传的文件列表，每个文件包含 url/type/name 字段")
 
 
 class ChatMessageResponse(BaseModel):
