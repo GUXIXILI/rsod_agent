@@ -14,11 +14,43 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
+from app.config.settings import settings
 from app.database.session import get_db
-from app.entity.schemas import ChatSessionCreate, ChatMessageRequest
+from app.entity.schemas import ChatAttachmentResponse, ChatSessionCreate, ChatMessageRequest
+from app.services.chat_attachment_service import chat_attachment_service
 from app.services.chat_service import chat_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+@router.post("/attachments", status_code=status.HTTP_201_CREATED)
+async def upload_attachment(
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Store an attachment and return only an opaque attachment ID."""
+    max_bytes = max(
+        settings.CHAT_ATTACHMENT_MAX_IMAGE_BYTES,
+        settings.CHAT_ATTACHMENT_MAX_VIDEO_BYTES,
+        settings.CHAT_ATTACHMENT_MAX_ZIP_BYTES,
+    )
+    content = await file.read(max_bytes + 1)
+    attachment = chat_attachment_service.upload(
+        db=db,
+        user_id=current_user.id,
+        filename=file.filename,
+        content_type=file.content_type,
+        data=content,
+    )
+    payload = ChatAttachmentResponse(
+        attachment_id=attachment.attachment_uuid,
+        file_name=attachment.file_name,
+        content_type=attachment.content_type,
+        file_size=attachment.file_size,
+        created_at=attachment.created_at,
+    )
+    return {"code": 200, "message": "success", "data": payload.model_dump()}
 
 
 @router.post("/sessions", status_code=status.HTTP_201_CREATED)
@@ -101,7 +133,13 @@ def send_message(
         session = chat_service.create_session(db, current_user.id)
         session_id = session.id
 
-    result = chat_service.send_message(db, session_id, current_user.id, request.content)
+    result = chat_service.send_message(
+        db,
+        session_id,
+        current_user.id,
+        request.content,
+        attachment_ids=request.attachment_ids,
+    )
     return {"code": 200, "message": "success", "data": result}
 
 

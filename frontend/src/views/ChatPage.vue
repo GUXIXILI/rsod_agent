@@ -57,8 +57,11 @@
           <div v-if="msg.role === 'user'" class="message-bubble user-bubble">
             <div class="message-content">{{ msg.content }}</div>
             <!-- 单张图片附件 -->
-            <div v-if="msg.image" class="message-attachment">
+            <div v-if="msg.imagePreview" class="message-attachment">
               <img :src="msg.imagePreview" alt="附件图片" />
+            </div>
+            <div v-if="msg.attachmentName && !msg.imagePreview" class="attachment-name">
+              附件：{{ msg.attachmentName }}
             </div>
             <!-- 多图附件（批量检测） -->
             <div v-if="msg.images && msg.images.length" class="message-attachments-grid">
@@ -186,7 +189,7 @@
         <input
           ref="fileInputRef"
           type="file"
-          accept="image/*,.zip"
+          accept="image/*,video/*,.zip"
           style="display: none"
           @change="handleFileSelect"
         />
@@ -233,11 +236,11 @@
  *   - 快捷操作栏（单图/批量/视频/摄像头）
  *   - 中断当前对话
  */
+import { uploadChatAttachment } from "@/api/chat";
 import { detectBatch, detectSingle, detectVideo, detectZip, getVideoStatus } from "@/api/detection";
 import DetectionResultCard from "@/components/DetectionResultCard.vue";
 import { useAgentStore } from "@/stores/agent";
 import { renderMarkdown } from "@/utils/markdown";
-import request from "@/utils/request";
 import { streamChat } from "@/utils/stream";
 import { CircleCheck, CircleClose, Loading, Plus, Refresh } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
@@ -307,11 +310,12 @@ async function sendMessage() {
   lastSentImage.value = fileToSend;
 
   // 添加用户消息到列表
+  const userContent = message || (fileToSend ? `请分析附件：${fileToSend.name}` : "");
   agentStore.addMessage({
     role: "user",
-    content: message,
-    image: fileToSend ? fileToSend.name : null,
-    imagePreview,
+    content: userContent,
+    attachmentName: fileToSend ? fileToSend.name : null,
+    imagePreview: fileToSend?.type.startsWith("image/") ? imagePreview : null,
   });
 
   // 清空输入
@@ -325,29 +329,44 @@ async function sendMessage() {
     loading: true,
     toolCalls: [],
   });
-
-  // 设置加载状态
   agentStore.setLoading(true);
 
   // 滚动到底部
   scrollToBottom();
 
-  // ── 如果有附件图片，当前后端未提供 /chat/upload 接口，提示用户输入路径 ──
+  // Upload first. The following chat request carries only the opaque ID; it
+  // never receives a MinIO key or a browser-controlled local path.
+  let attachmentId = null;
   if (fileToSend) {
-    const lastMsg = agentStore.getLastAssistantMessage();
-    if (lastMsg) {
-      lastMsg.content = `请直接输入图片路径或文件名（例如：检测一下 fire.jpg），当前不支持直接上传文件。`;
-      lastMsg.loading = false;
-      lastMsg.thinking = false;
+    try {
+      const formData = new FormData();
+      formData.append("file", fileToSend);
+      const uploadResult = await uploadChatAttachment(formData);
+      attachmentId = uploadResult.data?.attachment_id;
+      if (!attachmentId) {
+        throw new Error("服务器未返回附件 ID");
+      }
+    } catch (err) {
+      console.error("[图片上传失败]", err.response?.data || err.message || err);
+      const lastMsg = agentStore.getLastAssistantMessage();
+      if (lastMsg) {
+        lastMsg.content = `图片上传失败：${err.response?.data?.detail || err.message || "未知错误"}，请重试`;
+        lastMsg.loading = false;
+        lastMsg.error = true;
+      }
+      agentStore.setLoading(false);
+      return;
     }
-    agentStore.setLoading(false);
-    return;
   }
 
   // 发起 SSE 流式请求
   // 后端 /api/chat/messages/stream 要求字段名为 content
   const requestBody = {
-    content: message,
+    content: userContent,
+    ...(Number.isInteger(agentStore.currentSessionId)
+      ? { session_id: agentStore.currentSessionId }
+      : {}),
+    attachment_ids: attachmentId ? [attachmentId] : [],
   };
 
   let fullContent = "";
@@ -361,6 +380,10 @@ async function sendMessage() {
       if (!lastMsg) return;
 
       switch (data.type) {
+        case "start":
+          agentStore.currentSessionId = data.session_id;
+          break;
+
         // ── thinking：Agent 正在思考 ──
         case "thinking":
           lastMsg.thinking = true;
@@ -421,6 +444,10 @@ async function sendMessage() {
           lastMsg.content = fullContent;
           break;
 
+        // The backend emits token as a compatibility duplicate of text_chunk.
+        case "token":
+          break;
+
         // ── done：完成 ──
         case "done":
           if (data.response && !fullContent) {
@@ -433,7 +460,7 @@ async function sendMessage() {
 
         // ── error：错误 ──
         case "error":
-          lastMsg.content = data.content || "处理请求时发生错误";
+          lastMsg.content = data.content || data.message || "处理请求时发生错误";
           lastMsg.loading = false;
           lastMsg.thinking = false;
           lastMsg.error = true;
@@ -1195,6 +1222,12 @@ onMounted(() => {
     border-radius: 8px;
     border: 1px solid #e0e0e0;
   }
+}
+
+.attachment-name {
+  margin-top: 8px;
+  color: #606266;
+  font-size: 13px;
 }
 
 /* ── 多图附件网格 ── */

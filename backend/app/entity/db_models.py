@@ -43,6 +43,7 @@ class User(Base):
     detection_tasks = relationship("DetectionTask", back_populates="user")
     training_tasks = relationship("TrainingTask", back_populates="user")
     chat_sessions = relationship("ChatSession", back_populates="user")
+    chat_attachments = relationship("ChatAttachment", back_populates="user")
     operation_logs = relationship("OperationLog", back_populates="user")
 
 
@@ -359,6 +360,7 @@ class ChatSession(Base):
     user = relationship("User", back_populates="chat_sessions")
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan",
                             order_by="ChatMessage.created_at")
+    attachments = relationship("ChatAttachment", back_populates="session")
 
 
 class ChatMessage(Base):
@@ -383,6 +385,27 @@ class ChatMessage(Base):
 
     # 关联
     session = relationship("ChatSession", back_populates="messages")
+    attachments = relationship("ChatAttachment", back_populates="message")
+
+
+class ChatAttachment(Base):
+    """A user-owned chat file stored in MinIO and addressed by an opaque UUID."""
+    __tablename__ = "chat_attachments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    attachment_uuid = Column(String(36), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    session_id = Column(Integer, ForeignKey("chat_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    message_id = Column(Integer, ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True, index=True)
+    object_name = Column(String(500), unique=True, nullable=False)
+    file_name = Column(String(255), nullable=False)
+    content_type = Column(String(100), nullable=False)
+    file_size = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    user = relationship("User", back_populates="chat_attachments")
+    session = relationship("ChatSession", back_populates="attachments")
+    message = relationship("ChatMessage", back_populates="attachments")
 
 
 # ══════════════════════════════════════════════════════════════

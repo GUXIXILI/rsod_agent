@@ -1,289 +1,169 @@
-"""
-检测工具封装模块
+"""Attachment-ID based fire and smoke detection tools for the chat agent."""
 
-将 DetectionService 的 4 个核心检测方法封装为 LangChain @tool 装饰器工具，
-供 ReAct Agent 在推理过程中调用。
+from __future__ import annotations
 
-检测类别：fire（火焰）、smoke（烟雾）
-"""
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
 
-from typing import List, Optional
+from langchain_core.tools import BaseTool, ToolException, tool
+from pydantic import BaseModel, Field
 
-from langchain_core.tools import tool
-
+from app.config.settings import settings
 from app.services.detection_service import detection_service
-from app.core.logger import get_logger
-
-logger = get_logger(__name__)
 
 
-@tool
-def detect_single_image(
-    image_path: str,
-    conf: float = 0.25,
-    iou: float = 0.45,
-) -> str:
-    """对单张图片进行火焰和烟雾目标检测。
+IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
+VIDEO_SUFFIXES = {".avi", ".mkv", ".mov", ".mp4"}
+ZIP_SUFFIXES = {".zip"}
 
-    适用场景：用户上传单张图片，需要检测其中是否存在火焰或烟雾。
 
-    Args:
-        image_path: 图片文件的本地路径或 MinIO URL。
-        conf: 置信度阈值（0.0~1.0），默认 0.25。低于此值的检测结果会被过滤。
-        iou: NMS（非极大值抑制）IoU 阈值（0.0~1.0），默认 0.45。用于去除重叠框。
+class SingleImageInput(BaseModel):
+    attachment_id: str = Field(min_length=1, description="Authenticated chat attachment ID")
+    scene_id: int = Field(gt=0, description="Detection scene ID")
+    conf_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+    iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
+    image_size: int = Field(default=640, ge=320, le=1280)
 
-    Returns:
-        str: 检测结果摘要，包含检测到的火焰/烟雾目标数量、置信度、火情等级等信息。
-    """
+
+class BatchImagesInput(BaseModel):
+    attachment_ids: list[str] = Field(min_length=1, max_length=20, description="Authenticated chat attachment IDs")
+    scene_id: int = Field(gt=0, description="Detection scene ID")
+    conf_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+    iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
+    image_size: int = Field(default=640, ge=320, le=1280)
+
+
+class ZipImagesInput(SingleImageInput):
+    pass
+
+
+class VideoInput(SingleImageInput):
+    frame_skip: int = Field(default=5, ge=1, le=120)
+
+
+@dataclass(frozen=True)
+class DetectionToolRuntime:
+    """Authenticated dependencies that are never exposed in an LLM schema."""
+
+    user_id: int
+    db: Any
+    attachment_resolver: Callable[[str], Any] | None = None
+    service: Any = detection_service
+    stub_mode: bool = field(default_factory=lambda: settings.LLM_STUB_MODE)
+
+    def __post_init__(self) -> None:
+        if self.user_id <= 0:
+            raise ValueError("user_id must be positive")
+        if not self.stub_mode and self.attachment_resolver is None:
+            raise ValueError("attachment_resolver is required when stub mode is disabled")
+
+
+def _json(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _resolve(runtime: DetectionToolRuntime, attachment_id: str, suffixes: set[str], max_bytes: int) -> Any:
     try:
-        # 读取图片文件
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
-
-        import os
-        filename = os.path.basename(image_path)
-
-        from app.database.session import SessionLocal
-        db = SessionLocal()
-        try:
-            # 使用默认场景 ID=1（火灾烟雾检测场景）
-            task = detection_service.detect_single(
-                db=db,
-                user_id=1,  # Agent 调用时使用系统默认用户
-                scene_id=1,
-                image_file=image_bytes,
-                filename=filename,
-                conf_threshold=conf,
-                iou_threshold=iou,
-            )
-
-            # 构建检测结果摘要
-            fire_count = task.fire_object_count or 0
-            smoke_count = task.smoke_object_count or 0
-            fire_level = task.fire_level or "unknown"
-
-            result_lines = [
-                f"【单图检测结果】",
-                f"文件名：{filename}",
-                f"检测类别：fire（火焰）× {fire_count}，smoke（烟雾）× {smoke_count}",
-                f"火情等级：{fire_level}",
-                f"图片尺寸：{task.image_width}×{task.image_height}",
-            ]
-
-            if fire_level in ("warning", "danger"):
-                result_lines.append("⚠️ 警告：检测到火情，请立即关注并采取相应措施！")
-            elif smoke_count > 0:
-                result_lines.append("⚠️ 提示：检测到烟雾，建议持续关注。")
-            else:
-                result_lines.append("✅ 未检测到火焰或烟雾，当前状态安全。")
-
-            return "\n".join(result_lines)
-        finally:
-            db.close()
-    except FileNotFoundError:
-        return f"错误：找不到图片文件 '{image_path}'，请确认文件路径是否正确。"
-    except Exception as e:
-        logger.exception("单图检测工具调用失败: image_path=%s", image_path)
-        return f"单图检测失败：{str(e)}"
+        attachment = runtime.attachment_resolver(attachment_id) if runtime.attachment_resolver else None
+    except Exception as exc:
+        raise ToolException("Attachment could not be resolved") from exc
+    if attachment is None:
+        raise ToolException("Attachment could not be resolved")
+    if Path(getattr(attachment, "file_name", "")).suffix.lower() not in suffixes:
+        raise ToolException("Attachment type is not valid for this detection tool")
+    data = getattr(attachment, "data", b"")
+    if not isinstance(data, bytes) or not data:
+        raise ToolException("Attachment content is unavailable")
+    if len(data) > max_bytes:
+        raise ToolException("Attachment exceeds the allowed size")
+    return attachment
 
 
-@tool
-def detect_batch_images(
-    image_paths: List[str],
-    conf: float = 0.25,
-) -> str:
-    """对多张图片进行批量火焰烟雾检测。
-
-    适用场景：用户需要一次性检测多张图片，如监控截图批量分析。
-
-    Args:
-        image_paths: 图片文件路径列表，每项为本地路径或 MinIO URL。
-        conf: 置信度阈值（0.0~1.0），默认 0.25。
-
-    Returns:
-        str: 批量检测结果摘要，包含总检测数、检出火焰/烟雾的图片数、火情统计等。
-    """
-    try:
-        from app.database.session import SessionLocal
-
-        db = SessionLocal()
-        try:
-            image_files_list: List[bytes] = []
-            filenames_list: List[str] = []
-            import os
-
-            for path in image_paths:
-                with open(path, "rb") as f:
-                    image_files_list.append(f.read())
-                filenames_list.append(os.path.basename(path))
-
-            tasks = detection_service.detect_batch(
-                db=db,
-                user_id=1,
-                scene_id=1,
-                image_files=image_files_list,
-                filenames=filenames_list,
-                conf_threshold=conf,
-            )
-
-            total = len(tasks)
-            fire_detected = sum(1 for t in tasks if (t.fire_object_count or 0) > 0)
-            smoke_detected = sum(1 for t in tasks if (t.smoke_object_count or 0) > 0)
-            warning_count = sum(1 for t in tasks if t.fire_level in ("warning", "danger"))
-
-            result_lines = [
-                f"【批量检测结果】",
-                f"总检测图片数：{total}",
-                f"检出火焰的图片：{fire_detected} 张",
-                f"检出烟雾的图片：{smoke_detected} 张",
-                f"触发预警的图片：{warning_count} 张",
-            ]
-
-            if warning_count > 0:
-                result_lines.append("⚠️ 警告：部分图片检测到火情，请立即关注！")
-            elif smoke_detected > 0:
-                result_lines.append("⚠️ 提示：部分图片检测到烟雾，建议持续关注。")
-            else:
-                result_lines.append("✅ 所有图片均未检测到火焰或烟雾。")
-
-            return "\n".join(result_lines)
-        finally:
-            db.close()
-    except Exception as e:
-        logger.exception("批量检测工具调用失败")
-        return f"批量检测失败：{str(e)}"
+def _task_payload(task: Any) -> dict[str, Any]:
+    return {
+        "task_id": task.id,
+        "status": task.status,
+        "fire_level": task.fire_level,
+        "fire_count": task.fire_object_count,
+        "smoke_count": task.smoke_object_count,
+        "annotated_url": task.annotated_url,
+        "error_message": task.error_message,
+    }
 
 
-@tool
-def detect_zip_images_file(
-    zip_path: str,
-    conf: float = 0.25,
-) -> str:
-    """对 ZIP 压缩包中的图片进行批量火焰烟雾检测。
+def build_detection_tools(runtime: DetectionToolRuntime) -> list[BaseTool]:
+    """Build tools bound to a single authenticated user and database session."""
 
-    适用场景：用户上传 ZIP 压缩包，包含多张需要检测的图片。
+    @tool("detect_single_image", args_schema=SingleImageInput)
+    def detect_single_image(attachment_id: str, scene_id: int, conf_threshold: float = 0.25, iou_threshold: float = 0.45, image_size: int = 640) -> str:
+        """Detect one uploaded image by its attachment ID."""
+        if runtime.stub_mode:
+            return _json({"status": "simulated", "stub": True, "attachment_ids": [attachment_id]})
+        attachment = _resolve(runtime, attachment_id, IMAGE_SUFFIXES, settings.CHAT_ATTACHMENT_MAX_IMAGE_BYTES)
+        task = runtime.service.detect_single(db=runtime.db, user_id=runtime.user_id, scene_id=scene_id, image_file=attachment.data, filename=attachment.file_name, conf_threshold=conf_threshold, iou_threshold=iou_threshold, image_size=image_size)
+        return _json(_task_payload(task))
 
-    Args:
-        zip_path: ZIP 压缩包文件的本地路径。
-        conf: 置信度阈值（0.0~1.0），默认 0.25。
+    @tool("detect_batch_images", args_schema=BatchImagesInput)
+    def detect_batch_images(attachment_ids: list[str], scene_id: int, conf_threshold: float = 0.25, iou_threshold: float = 0.45, image_size: int = 640) -> str:
+        """Detect up to 20 uploaded images by their attachment IDs."""
+        if runtime.stub_mode:
+            return _json({"status": "simulated", "stub": True, "attachment_ids": attachment_ids})
+        attachments = [_resolve(runtime, item, IMAGE_SUFFIXES, settings.CHAT_ATTACHMENT_MAX_IMAGE_BYTES) for item in attachment_ids]
+        tasks = runtime.service.detect_batch(db=runtime.db, user_id=runtime.user_id, scene_id=scene_id, image_files=[item.data for item in attachments], filenames=[item.file_name for item in attachments], conf_threshold=conf_threshold, iou_threshold=iou_threshold, image_size=image_size)
+        return _json({"status": "completed", "total": len(tasks), "tasks": [_task_payload(task) for task in tasks]})
 
-    Returns:
-        str: ZIP 批量检测结果摘要，包含解压文件数、成功检测数、检出统计等。
-    """
-    try:
-        with open(zip_path, "rb") as f:
-            zip_bytes = f.read()
+    @tool("detect_zip_images_file", args_schema=ZipImagesInput)
+    def detect_zip_images_file(attachment_id: str, scene_id: int, conf_threshold: float = 0.25, iou_threshold: float = 0.45, image_size: int = 640) -> str:
+        """Detect images contained in one uploaded ZIP attachment."""
+        if runtime.stub_mode:
+            return _json({"status": "simulated", "stub": True, "attachment_ids": [attachment_id]})
+        attachment = _resolve(runtime, attachment_id, ZIP_SUFFIXES, settings.CHAT_ATTACHMENT_MAX_ZIP_BYTES)
+        detect_zip = getattr(runtime.service, "detect_zip", None)
+        if detect_zip is None:
+            raise ToolException("ZIP detection service is not implemented")
+        result = detect_zip(db=runtime.db, user_id=runtime.user_id, scene_id=scene_id, zip_bytes=attachment.data, filename=attachment.file_name, conf_threshold=conf_threshold, iou_threshold=iou_threshold, image_size=image_size)
+        return _json(result if not isinstance(result, list) else {"status": "completed", "total": len(result), "tasks": [_task_payload(task) for task in result]})
 
-        import os
-        filename = os.path.basename(zip_path)
+    @tool("detect_video_file", args_schema=VideoInput)
+    def detect_video_file(attachment_id: str, scene_id: int, conf_threshold: float = 0.25, iou_threshold: float = 0.45, image_size: int = 640, frame_skip: int = 5) -> str:
+        """Detect one uploaded video by its attachment ID."""
+        if runtime.stub_mode:
+            return _json({"status": "simulated", "stub": True, "attachment_ids": [attachment_id]})
+        attachment = _resolve(runtime, attachment_id, VIDEO_SUFFIXES, settings.CHAT_ATTACHMENT_MAX_VIDEO_BYTES)
+        task = runtime.service.detect_video(db=runtime.db, user_id=runtime.user_id, scene_id=scene_id, video_bytes=attachment.data, filename=attachment.file_name, conf_threshold=conf_threshold, iou_threshold=iou_threshold, image_size=image_size, frame_skip=frame_skip)
+        return _json(_task_payload(task))
 
-        from app.database.session import SessionLocal
-        db = SessionLocal()
-        try:
-            tasks = detection_service.detect_zip(
-                db=db,
-                user_id=1,
-                scene_id=1,
-                zip_bytes=zip_bytes,
-                filename=filename,
-                conf_threshold=conf,
-            )
-
-            total = len(tasks)
-            fire_detected = sum(1 for t in tasks if (t.fire_object_count or 0) > 0)
-            smoke_detected = sum(1 for t in tasks if (t.smoke_object_count or 0) > 0)
-            warning_count = sum(1 for t in tasks if t.fire_level in ("warning", "danger"))
-
-            result_lines = [
-                f"【ZIP 批量检测结果】",
-                f"ZIP 文件：{filename}",
-                f"成功检测图片数：{total}",
-                f"检出火焰的图片：{fire_detected} 张",
-                f"检出烟雾的图片：{smoke_detected} 张",
-                f"触发预警的图片：{warning_count} 张",
-            ]
-
-            if warning_count > 0:
-                result_lines.append("⚠️ 警告：ZIP 包中部分图片检测到火情，请立即关注！")
-            elif smoke_detected > 0:
-                result_lines.append("⚠️ 提示：ZIP 包中部分图片检测到烟雾，建议持续关注。")
-            else:
-                result_lines.append("✅ ZIP 包中所有图片均未检测到火焰或烟雾。")
-
-            return "\n".join(result_lines)
-        finally:
-            db.close()
-    except FileNotFoundError:
-        return f"错误：找不到 ZIP 文件 '{zip_path}'，请确认文件路径是否正确。"
-    except Exception as e:
-        logger.exception("ZIP 批量检测工具调用失败: zip_path=%s", zip_path)
-        return f"ZIP 批量检测失败：{str(e)}"
+    return [detect_single_image, detect_batch_images, detect_zip_images_file, detect_video_file]
 
 
-@tool
-def detect_video_file(
-    video_path: str,
-    conf: float = 0.25,
-    frame_sample_rate: int = 5,
-) -> str:
-    """对视频文件进行逐帧火焰烟雾检测。
+def _unscoped_tool_error() -> str:
+    return _json({"status": "rejected", "message": "Use an authenticated attachment_id workflow; unscoped tools cannot access files."})
 
-    适用场景：用户上传监控视频，需要检测视频中是否出现火焰或烟雾。
 
-    Args:
-        video_path: 视频文件的本地路径。
-        conf: 置信度阈值（0.0~1.0），默认 0.25。
-        frame_sample_rate: 采样帧率，默认 5（即每 5 帧检测一次）。值越大检测越快，但可能遗漏短暂出现的火焰/烟雾。
+@tool("detect_single_image")
+def detect_single_image(attachment_id: str, scene_id: int) -> str:
+    """Compatibility declaration for Agent discovery; runtime binding is required."""
+    return _unscoped_tool_error()
 
-    Returns:
-        str: 视频检测结果摘要，包含视频时长、总帧数、检出火焰/烟雾的帧数、火情等级等。
-    """
-    try:
-        with open(video_path, "rb") as f:
-            video_bytes = f.read()
 
-        import os
-        filename = os.path.basename(video_path)
+@tool("detect_batch_images")
+def detect_batch_images(attachment_ids: list[str], scene_id: int) -> str:
+    """Compatibility declaration for Agent discovery; runtime binding is required."""
+    return _unscoped_tool_error()
 
-        from app.database.session import SessionLocal
-        db = SessionLocal()
-        try:
-            task = detection_service.detect_video(
-                db=db,
-                user_id=1,
-                scene_id=1,
-                video_bytes=video_bytes,
-                filename=filename,
-                conf_threshold=conf,
-                frame_skip=frame_sample_rate,
-            )
 
-            fire_count = task.fire_object_count or 0
-            smoke_count = task.smoke_object_count or 0
-            fire_level = task.fire_level or "unknown"
-            duration = task.video_duration or 0
+@tool("detect_zip_images_file")
+def detect_zip_images_file(attachment_id: str, scene_id: int) -> str:
+    """Compatibility declaration for Agent discovery; runtime binding is required."""
+    return _unscoped_tool_error()
 
-            result_lines = [
-                f"【视频检测结果】",
-                f"视频文件：{filename}",
-                f"视频时长：{duration:.1f} 秒",
-                f"检测类别：fire（火焰）× {fire_count}，smoke（烟雾）× {smoke_count}",
-                f"火情等级：{fire_level}",
-                f"采样帧率：每 {frame_sample_rate} 帧检测一次",
-            ]
 
-            if fire_level in ("warning", "danger"):
-                result_lines.append("⚠️ 警告：视频中检测到火情，请立即关注并采取相应措施！")
-            elif smoke_count > 0:
-                result_lines.append("⚠️ 提示：视频中检测到烟雾，建议持续关注。")
-            else:
-                result_lines.append("✅ 视频中未检测到火焰或烟雾，当前状态安全。")
+@tool("detect_video_file")
+def detect_video_file(attachment_id: str, scene_id: int) -> str:
+    """Compatibility declaration for Agent discovery; runtime binding is required."""
+    return _unscoped_tool_error()
 
-            return "\n".join(result_lines)
-        finally:
-            db.close()
-    except FileNotFoundError:
-        return f"错误：找不到视频文件 '{video_path}'，请确认文件路径是否正确。"
-    except Exception as e:
-        logger.exception("视频检测工具调用失败: video_path=%s", video_path)
-        return f"视频检测失败：{str(e)}"
+
+__all__ = ["DetectionToolRuntime", "build_detection_tools", "detect_single_image", "detect_batch_images", "detect_zip_images_file", "detect_video_file"]

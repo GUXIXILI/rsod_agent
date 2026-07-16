@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # 通义千问 API Key（占位值，实际使用时需配置）
     QWEN_API_KEY: str = ""
 
+    # Chat attachment limits. The server validates both the file suffix and size
+    # before storing an attachment, and only exposes an opaque attachment ID.
+    CHAT_ATTACHMENT_MAX_IMAGE_BYTES: int = 20 * 1024 * 1024
+    CHAT_ATTACHMENT_MAX_VIDEO_BYTES: int = 500 * 1024 * 1024
+    CHAT_ATTACHMENT_MAX_ZIP_BYTES: int = 200 * 1024 * 1024
+    CHAT_ATTACHMENT_MAX_COUNT: int = 20
+
     # ── JWT 认证配置 ──────────────────────────────────
     JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"

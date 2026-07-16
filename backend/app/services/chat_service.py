@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.detection_agent import detection_agent
 from app.entity.db_models import ChatSession, ChatMessage
+from app.services.chat_attachment_service import chat_attachment_service
 from app.config.settings import settings
 from app.core.logger import get_logger
 
@@ -151,6 +152,16 @@ class ChatService:
                 "tool_result": m.tool_result,
                 "tokens_used": m.tokens_used,
                 "latency_ms": m.latency_ms,
+                "attachments": [
+                    {
+                        "attachment_id": attachment.attachment_uuid,
+                        "file_name": attachment.file_name,
+                        "content_type": attachment.content_type,
+                        "file_size": attachment.file_size,
+                        "created_at": attachment.created_at,
+                    }
+                    for attachment in m.attachments
+                ],
                 "created_at": m.created_at,
             }
             for m in messages
@@ -162,6 +173,7 @@ class ChatService:
         session_id: int,
         user_id: int,
         content: str,
+        attachment_ids: list[str] | None = None,
     ) -> dict:
         """
         发送消息并存储（集成 ReAct Agent 流程）
@@ -178,6 +190,13 @@ class ChatService:
         )
         db.add(user_msg)
         db.flush()
+        chat_attachment_service.bind_to_message(
+            db=db,
+            user_id=user_id,
+            session_id=session_id,
+            message_id=user_msg.id,
+            attachment_ids=attachment_ids,
+        )
 
         # 加载会话历史作为 LLM 上下文
         history_messages = (
@@ -434,17 +453,6 @@ class ChatService:
         if iou_match:
             args["iou"] = float(iou_match.group(1))
 
-        # 提取文件路径（简单模式：匹配常见的文件路径格式）
-        path_match = re.search(r'(?:路径|文件|图片|视频|zip)[=：:\s]*([^\s,，。]+\.(?:jpg|jpeg|png|bmp|mp4|avi|zip))', content, re.IGNORECASE)
-        if path_match:
-            path_val = path_match.group(1)
-            if tool_name in ("detect_single_image",):
-                args["image_path"] = path_val
-            elif tool_name == "detect_video_file":
-                args["video_path"] = path_val
-            elif tool_name == "detect_zip_images_file":
-                args["zip_path"] = path_val
-
         # 提取页码
         page_match = re.search(r'(?:第\s*(\d+)\s*页|page[=：:\s]*(\d+))', content, re.IGNORECASE)
         if page_match:
@@ -591,6 +599,14 @@ class ChatService:
                 agent_used="user",
             )
             db.add(user_msg)
+            db.flush()
+            chat_attachment_service.bind_to_message(
+                db=db,
+                user_id=user_id,
+                session_id=session.id,
+                message_id=user_msg.id,
+                attachment_ids=data.attachment_ids,
+            )
             db.commit()
             db.refresh(user_msg)
             user_msg_id = user_msg.id

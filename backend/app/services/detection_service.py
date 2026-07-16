@@ -595,9 +595,9 @@ class DetectionService:
 
     def _load_model(self, db: Optional[Session], scene_id: int):
         """加载场景默认模型（带 LRU 缓存，最大 MAX_CACHE_SIZE 个）
-        
+
         当 db=None 时（如 detect_frame 纯推理场景），仅从缓存加载或使用默认模型。
-        
+
         模型路径解析优先级：
         1. DB 中场景绑定的默认模型（db 不为 None 时）
         2. settings.DEFAULT_MODEL_PATH（相对于后端根目录解析）

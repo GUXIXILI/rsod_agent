@@ -373,7 +373,16 @@ class ChatMessageRequest(BaseModel):
     """发送消息请求"""
     session_id: Optional[int] = Field(None, description="会话 ID（为空则自动创建新会话）")
     content: str = Field(..., min_length=1, max_length=5000, description="消息内容")
-    image_path: Optional[str] = Field(None, description="快捷检测图片路径")
+    attachment_ids: list[str] = Field(default_factory=list, max_length=20, description="已上传附件的 ID 列表")
+
+
+class ChatAttachmentResponse(BaseModel):
+    """Chat attachment metadata. Object storage paths are never exposed."""
+    attachment_id: str
+    file_name: str
+    content_type: str
+    file_size: int
+    created_at: datetime
 
 
 class ChatMessageResponse(BaseModel):
@@ -387,6 +396,7 @@ class ChatMessageResponse(BaseModel):
     tool_result: Optional[str] = None
     tokens_used: Optional[int] = None
     latency_ms: Optional[int] = None
+    attachments: list[ChatAttachmentResponse] = Field(default_factory=list)
     created_at: datetime
 
     model_config = {"from_attributes": True}

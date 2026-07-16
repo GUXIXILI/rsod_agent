@@ -7,6 +7,8 @@ Agent 工具模块 — 统一导出所有工具函数
 """
 
 from app.agent.tools.detection_tool import (
+    DetectionToolRuntime,
+    build_detection_tools,
     detect_single_image,
     detect_batch_images,
     detect_zip_images_file,
@@ -17,6 +19,8 @@ from app.agent.tools.stats_tool import query_detection_stats, query_detection_hi
 from app.agent.tools.user_tool import query_user_list
 
 __all__ = [
+    "DetectionToolRuntime",
+    "build_detection_tools",
     "detect_single_image",
     "detect_batch_images",
     "detect_zip_images_file",
