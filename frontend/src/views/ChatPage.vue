@@ -15,8 +15,20 @@
             <img :src="msg.imagePreview" alt="附件图片" />
           </div>
           <!-- 多图附件（批量检测） -->
-          <div v-if="msg.images && msg.images.length" class="message-attachments-grid">
-            <img v-for="(src, i) in msg.images" :key="i" :src="src" alt="附件图片" />
+          <div
+            v-if="msg.images && msg.images.length"
+            class="message-attachments-grid"
+          >
+            <img
+              v-for="(src, i) in msg.images"
+              :key="i"
+              :src="src"
+              alt="附件图片"
+            />
+          </div>
+          <!-- 视频附件 -->
+          <div v-if="msg.videoUrl" class="message-attachment video-attachment">
+            <video :src="msg.videoUrl" controls preload="metadata"></video>
           </div>
         </div>
 
@@ -34,11 +46,113 @@
             v-html="renderMarkdown(msg.content)"
           ></div>
 
+          <!-- 知识来源显示区域 -->
+          <div
+            v-if="msg.knowledgeSources && msg.knowledgeSources.length > 0"
+            class="knowledge-sources"
+          >
+            <el-icon color="#67c23a"><CircleCheckFilled /></el-icon>
+            <span class="knowledge-label">知识库检索</span>
+            <span class="tag knowledge">[Knowledge]</span>
+            <span class="tag content">[Content]</span>
+            <span
+              v-for="(source, idx) in msg.knowledgeSources"
+              :key="idx"
+              class="tag source"
+              >* "{{ source.title || source.source }}"</span
+            >
+          </div>
+          <div
+            v-else-if="msg.hasKnowledge === false"
+            class="knowledge-sources no-knowledge"
+          >
+            <el-icon color="#909399"><InfoFilled /></el-icon>
+            <span class="knowledge-label">知识库检索</span>
+            <span class="tag knowledge">[Knowledge]</span>
+            <span class="no-knowledge-text">知识库中暂无相关内容，答案来自【LLM】</span>
+          </div>
+
+          <!-- 工具调用状态展示 -->
+          <div
+            v-if="msg.toolCalls && msg.toolCalls.length > 0"
+            class="tool-calls"
+          >
+            <div
+              v-for="(tc, idx) in msg.toolCalls"
+              :key="idx"
+              class="tool-call-item"
+              :class="{ 'is-loading': tc.status === 'loading' }"
+            >
+              <el-icon v-if="tc.status === 'loading'" class="is-loading">
+                <Loading />
+              </el-icon>
+              <el-icon v-else color="#67c23a"><CircleCheckFilled /></el-icon>
+              <span class="tool-name">{{ getToolName(tc.tool) }}</span>
+              <template v-if="tc.titles && tc.titles.length > 0">
+                <span class="tool-tags">
+                  <span class="tag knowledge">[Knowledge]</span>
+                  <span class="tag content">[Content]</span>
+                  <span class="tag source">* "{{ tc.titles[0] }}"</span>
+                </span>
+              </template>
+              <template v-else>
+                <span class="tool-arrow">→</span>
+                <span
+                  class="tool-summary"
+                  :class="{
+                    success: tc.summary === '检索成功',
+                    warning: tc.summary.includes('暂无'),
+                  }"
+                  >{{
+                    tc.summary ||
+                    (tc.status === "loading" ? "执行中..." : "完成")
+                  }}</span
+                >
+              </template>
+            </div>
+          </div>
           <!-- 检测结果卡片 -->
           <DetectionResultCard
             v-if="msg.detectionResult"
             :result="msg.detectionResult"
           />
+
+          <!-- 多智能体调用链可视化 -->
+          <div
+            v-if="msg.agentChain && msg.agentChain.length > 0"
+            class="agent-chain"
+          >
+            <div class="agent-chain-title">
+              <el-icon><Connection /></el-icon>
+              <span>多智能体调用链</span>
+            </div>
+            <div class="agent-chain-path">
+              <div
+                v-for="(step, idx) in msg.agentChain"
+                :key="idx"
+                class="agent-chain-step"
+                :class="getAgentNodeClass(step.node)"
+              >
+                <div class="agent-node">
+                  <el-icon><component :is="getAgentIcon(step.node)" /></el-icon>
+                  <span>{{ getAgentNodeName(step.node) }}</span>
+                </div>
+                <div v-if="idx < msg.agentChain.length - 1" class="agent-arrow">
+                  <el-icon><ArrowRight /></el-icon>
+                </div>
+              </div>
+            </div>
+            <div class="agent-chain-details">
+              <div
+                v-for="(step, idx) in msg.agentChain"
+                :key="idx"
+                class="agent-step-detail"
+              >
+                <span class="detail-label">{{ getAgentNodeName(step.node) }}:</span>
+                <span class="detail-value">{{ getAgentStepSummary(step) }}</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 工具调用提示 -->
@@ -64,8 +178,9 @@
       >
         📁 批量/ZIP
       </el-button>
-      <el-button disabled>🎬 视频</el-button>
-      <el-button disabled>📹 摄像头</el-button>
+      <el-button @click="handleVideoDetect" :disabled="agentStore.isLoading"
+        >🎬 视频</el-button
+      >
     </div>
 
     <!-- ── 输入区域 ── -->
@@ -82,9 +197,10 @@
       <input
         ref="fileInputRef"
         type="file"
-        accept="image/*,.zip"
+        accept="image/*,video/mp4,video/avi,video/quicktime,video/x-msvideo,.zip"
         style="display: none"
         @change="handleFileSelect"
+        multiple
       />
 
       <!-- 文本输入框 -->
@@ -121,12 +237,30 @@
  *   - 快捷操作栏（单图/批量/视频/摄像头）
  *   - 中断当前对话
  */
-import { detectBatch, detectSingle, detectZip } from "@/api/detection";
+import {
+  detectBatch,
+  detectSingle,
+  detectVideo,
+  detectZip,
+  getVideoStatus,
+} from "@/api/detection";
 import DetectionResultCard from "@/components/DetectionResultCard.vue";
 import { useAgentStore } from "@/stores/agent";
 import { renderMarkdown } from "@/utils/markdown";
 import request from "@/utils/request";
 import { streamChat } from "@/utils/stream";
+import {
+  ArrowRight,
+  Camera,
+  CircleCheck,
+  CircleCheckFilled,
+  Connection,
+  InfoFilled,
+  Loading,
+  MessageBox,
+  PieChart,
+  Setting
+} from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { computed, nextTick, onMounted, ref } from "vue";
 
@@ -136,111 +270,256 @@ const agentStore = useAgentStore();
 // ── 响应式状态 ──
 const inputText = ref("");
 const selectedFile = ref(null);
+const selectedFiles = ref([]);
+const selectedVideo = ref(null);
 const messageListRef = ref(null);
 const fileInputRef = ref(null);
 
 // ── 计算属性 ──
 const canSend = computed(() => {
-  return inputText.value.trim() || selectedFile.value;
+  return (
+    inputText.value.trim() ||
+    selectedFile.value ||
+    selectedFiles.value.length > 0
+  );
 });
-
-// ── 方法 ──
 
 /** 发送消息 */
 async function sendMessage() {
-  if (!canSend.value) return;
+  const text = inputText.value.trim();
+  if (
+    !text &&
+    !selectedFile.value &&
+    selectedFiles.value.length === 0 &&
+    !selectedVideo.value
+  )
+    return;
 
-  const message = inputText.value.trim();
-  // ── 关键：在清空之前保存文件引用 ──
-  const fileToSend = selectedFile.value;
-  const imagePreview = fileToSend ? URL.createObjectURL(fileToSend) : null;
+  const message = text;
+  const filesToSend =
+    selectedFiles.value.length > 0
+      ? selectedFiles.value
+      : selectedFile.value
+        ? [selectedFile.value]
+        : [];
+  const videoToSend = selectedVideo.value;
+  const isZip = selectedFile.value && selectedFile.value.name.endsWith(".zip");
 
-  // 添加用户消息到列表
-  agentStore.addMessage({
-    role: "user",
-    content: message,
-    image: fileToSend ? fileToSend.name : null,
-    imagePreview,
-  });
+  let imagePreviews = [];
+  let videoPreview = null;
 
-  // 清空输入
+  if (isZip) {
+    agentStore.addMessage({
+      role: "user",
+      content: message,
+      image: selectedFile.value.name,
+      imagePreview: URL.createObjectURL(selectedFile.value),
+    });
+  } else if (videoToSend) {
+    videoPreview = URL.createObjectURL(videoToSend);
+    agentStore.addMessage({
+      role: "user",
+      content: message || `[视频检测] ${videoToSend.name}`,
+      videoUrl: videoPreview,
+    });
+  } else if (filesToSend.length > 0) {
+    imagePreviews = filesToSend.map((f) => URL.createObjectURL(f));
+    agentStore.addMessage({
+      role: "user",
+      content: message,
+      image:
+        filesToSend.length === 1
+          ? filesToSend[0].name
+          : `${filesToSend.length} 张图片`,
+      images: filesToSend.length > 1 ? imagePreviews : [],
+      imagePreview: filesToSend.length === 1 ? imagePreviews[0] : null,
+    });
+  } else {
+    agentStore.addMessage({
+      role: "user",
+      content: message,
+    });
+  }
+
   inputText.value = "";
   selectedFile.value = null;
+  selectedFiles.value = [];
+  selectedVideo.value = null;
 
-  // 添加 AI 加载占位
   agentStore.addMessage({
     role: "assistant",
     content: "",
     loading: true,
+    toolCalls: [],
   });
 
-  // 滚动到底部
   scrollToBottom();
 
-  // ── 如果有附件图片，先上传到服务端获取真实路径 ──
   let serverImagePath = null;
-  if (fileToSend) {
-    try {
+  let serverVideoPath = null;
+  let serverImagePaths = [];
+
+  try {
+    if (isZip) {
       const formData = new FormData();
-      formData.append("file", fileToSend);
-      // 不设置 Content-Type，让 axios 自动添加 boundary
+      formData.append("file", selectedFile.value);
       const uploadResult = await request.post("/chat/upload", formData);
       serverImagePath = uploadResult.image_path;
-    } catch (err) {
-      console.error("[图片上传失败]", err.response?.data || err.message || err);
-      const lastMsg = agentStore.messages[agentStore.messages.length - 1];
-      lastMsg.content = `图片上传失败：${err.response?.data?.detail || err.message || "未知错误"}，请重试`;
-      lastMsg.loading = false;
-      lastMsg.error = true;
-      return;
+    } else if (videoToSend) {
+      const formData = new FormData();
+      formData.append("file", videoToSend);
+      const uploadResult = await request.post("/chat/upload", formData);
+      serverVideoPath = uploadResult.image_path;
+    } else if (filesToSend.length === 1) {
+      const formData = new FormData();
+      formData.append("file", filesToSend[0]);
+      const uploadResult = await request.post("/chat/upload", formData);
+      serverImagePath = uploadResult.image_path;
+    } else if (filesToSend.length > 1) {
+      const formData = new FormData();
+      filesToSend.forEach((f) => formData.append("files", f));
+      const uploadResult = await request.post("/chat/upload", formData);
+      serverImagePaths = uploadResult.image_paths || [];
     }
+  } catch (err) {
+    console.error("[文件上传失败]", err);
+    const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+    lastMsg.content = `文件上传失败：${err.message || "未知错误"}`;
+    lastMsg.loading = false;
+    lastMsg.error = true;
+    return;
   }
 
-  // 发起 SSE 流式请求
+  if (!agentStore.currentSessionId) {
+    agentStore.currentSessionId = Math.random().toString(36).slice(2, 10);
+  }
+
   const requestBody = {
-    message,
+    message:
+      message ||
+      (isZip
+        ? `检测 ZIP 文件: ${selectedFile.value.name}`
+        : videoToSend
+          ? `检测视频: ${videoToSend.name}`
+          : `检测图片`),
+    session_id: agentStore.currentSessionId,
     ...(serverImagePath ? { image_path: serverImagePath } : {}),
+    ...(serverVideoPath ? { video_path: serverVideoPath } : {}),
+    ...(serverImagePaths.length > 0 ? { image_paths: serverImagePaths } : {}),
   };
 
   let fullContent = "";
-  //backend 这与教师档案不符。如果更正后，将会删除/message/ from streamChat()
-  const stop = streamChat("/api/chat/messages/stream", requestBody, {
+
+  const stop = streamChat("/api/chat/multi-agent", requestBody, {
     onMessage: (data) => {
-      // 调试日志：查看收到的所有 SSE 事件
-      console.log("[SSE事件]", data.type, data.type === "tool_result" ? data : "");
+      const lastMsg = agentStore.messages[agentStore.messages.length - 1];
 
       if (data.type === "text_chunk") {
         fullContent += data.content;
         agentStore.updateLastAssistantMessage(fullContent);
+        const latestMsg = agentStore.messages[agentStore.messages.length - 1];
+        if (data.knowledge_sources) {
+          latestMsg.knowledgeSources = data.knowledge_sources;
+        }
+        if (data.has_knowledge !== undefined) {
+          latestMsg.hasKnowledge = data.has_knowledge;
+        }
+        scrollToBottom();
+      } else if (data.type === "tool_start") {
+        // Day 11：添加工具调用记录（loading 状态）
+        if (!lastMsg.toolCalls) lastMsg.toolCalls = [];
+        lastMsg.toolCalls.push({
+          tool: data.tool,
+          status: "loading",
+          summary: "",
+        });
+        scrollToBottom();
+      } else if (data.type === "tool_end") {
+        if (!lastMsg.toolCalls) lastMsg.toolCalls = [];
+        const tc = lastMsg.toolCalls.find(
+          (t) => t.tool === data.tool && t.status === "loading",
+        );
+        if (tc) {
+          tc.status = "done";
+          tc.summary = data.summary?.slice(0, 80) || "完成";
+        }
+        if (data.result) {
+          try {
+            const result =
+              typeof data.result === "string"
+                ? JSON.parse(data.result)
+                : data.result;
+            const isDetectionResult =
+              result.annotated_image_url ||
+              result.annotated_video_url ||
+              result.annotated_images ||
+              result.type === "video";
+            if (isDetectionResult) {
+              lastMsg.detectionResult = result;
+            }
+            if (data.tool === "search_knowledge") {
+              if (result.knowledge && result.knowledge.length > 0) {
+                const sources = [
+                  ...new Set(result.knowledge.map((k) => k.source)),
+                ];
+                const titles = [
+                  ...new Set(
+                    result.knowledge.map(
+                      (k) => k.content.match(/#\s+(.+)/)?.[1] || k.source,
+                    ),
+                  ),
+                ];
+                if (tc) {
+                  tc.summary = "检索成功";
+                  tc.sources = sources;
+                  tc.titles = titles;
+                }
+              } else if (result.answer === "知识库中暂无相关内容") {
+                if (tc) tc.summary = "知识库中暂无此内容，回答来自LLM";
+              }
+            }
+          } catch (e) {
+            console.error("[解析工具结果失败]", e);
+          }
+        }
         scrollToBottom();
       } else if (data.type === "tool_call") {
-        // 工具调用中，更新最后一条 AI 消息的工具信息
-        const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+        // 兼容旧版事件类型
         lastMsg.toolCall = { tool: data.tool, input: data.input };
       } else if (data.type === "tool_result") {
-        // 工具调用返回结果
-        const lastMsg = agentStore.messages[agentStore.messages.length - 1];
-        console.log("[工具结果] tool:", data.tool, "result长度:", data.result?.length);
+        // 兼容旧版事件类型
         try {
           const result = JSON.parse(data.result);
-          console.log("[工具结果解析]", "total_objects:", result.total_objects, "detections:", result.detections?.length);
           if (result.detections) {
-            // 有检测结果，设置到消息中
             lastMsg.detectionResult = result;
             lastMsg.loading = false;
-            console.log("[检测结果卡片已设置]", lastMsg.detectionResult);
           }
         } catch (e) {
-          console.warn("[工具结果解析失败]", e.message, "原始数据:", data.result?.substring(0, 200));
-          // 非检测结果 JSON，作为普通文本
           lastMsg.content += `\n[工具结果: ${data.result?.substring(0, 100)}...]`;
         }
         scrollToBottom();
       } else if (data.type === "error") {
-        const lastMsg = agentStore.messages[agentStore.messages.length - 1];
         lastMsg.content = data.content;
         lastMsg.loading = false;
         lastMsg.error = true;
+      } else if (data.type === "multi_agent") {
+        if (!lastMsg.agentChain) lastMsg.agentChain = [];
+        lastMsg.agentChain.push({
+          node: data.node,
+          data: data.data,
+        });
+        if (data.data.detection_result) {
+          const result = data.data.detection_result;
+          const isDetectionResult =
+            result.annotated_image_url ||
+            result.annotated_video_url ||
+            result.annotated_images ||
+            result.type === "video";
+          if (isDetectionResult) {
+            lastMsg.detectionResult = result;
+          }
+        }
+        scrollToBottom();
       }
     },
     onDone: () => {
@@ -260,7 +539,7 @@ async function sendMessage() {
     },
   });
 
-  // 保存 中断函数到 store
+  // 保存中断函数到 store
   agentStore.abortController = stop;
 }
 
@@ -281,13 +560,45 @@ function triggerFileInput() {
 
 /** 文件选择回调 */
 function handleFileSelect(event) {
-  const file = event.target.files[0];
-  if (file) {
-    selectedFile.value = file;
-    // 临时保存文件路径（后续上传用）
-    file._tempPath = URL.createObjectURL(file);
-    ElMessage.info(`${file.name} 已选择`);
+  const files = Array.from(event.target.files);
+  if (!files.length) return;
+
+  const isZip = files.some((f) => f.name.endsWith(".zip"));
+  const isVideo = files.some((f) => f.type.startsWith("video/"));
+  const isImage = files.some((f) => f.type.startsWith("image/"));
+
+  if (isZip && files.length === 1) {
+    selectedFile.value = files[0];
+    selectedFiles.value = [];
+    selectedVideo.value = null;
+    files[0]._tempPath = URL.createObjectURL(files[0]);
+    ElMessage.info(`ZIP 文件已选择: ${files[0].name}`);
+  } else if (isVideo) {
+    const videoFile = files.find((f) => f.type.startsWith("video/"));
+    selectedFile.value = videoFile;
+    selectedFiles.value = [];
+    selectedVideo.value = videoFile;
+    videoFile._tempPath = URL.createObjectURL(videoFile);
+    ElMessage.info(`视频文件已选择: ${videoFile.name}`);
+  } else if (isImage) {
+    if (files.length === 1) {
+      selectedFile.value = files[0];
+      selectedFiles.value = [];
+      selectedVideo.value = null;
+      files[0]._tempPath = URL.createObjectURL(files[0]);
+      ElMessage.info(`图片已选择: ${files[0].name}`);
+    } else {
+      selectedFiles.value = files;
+      selectedFile.value = null;
+      selectedVideo.value = null;
+      files.forEach((f) => {
+        f._tempPath = URL.createObjectURL(f);
+      });
+      ElMessage.info(`${files.length} 张图片已选择`);
+    }
   }
+
+  event.target.value = "";
 }
 
 /** 滚动到底部 */
@@ -415,13 +726,216 @@ async function handleQuickDetect(type) {
   }
 }
 
+/**
+ * 视频检测流程：
+ * 1. 用户点击 "🎬 视频" 按钮
+ * 2. 弹出文件选择框（限制视频格式）
+ * 3. 选择视频后，上传到后端
+ * 4. 后端返回 task_id，前端开始轮询进度
+ * 5. 处理完成后，展示关键帧结果卡片
+ */
+async function handleVideoDetect() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "video/mp4,video/avi,video/quicktime,video/x-msvideo";
+  input.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    // 校验文件大小（50MB）
+    const maxSize = 50 * 1024 * 1024;
+    if (file.size > maxSize) {
+      ElMessage.warning("视频文件不能超过 50MB");
+      return;
+    }
+
+    // 创建视频的 Blob URL 用于预览
+    const videoUrl = URL.createObjectURL(file);
+
+    // 添加用户消息
+    agentStore.addMessage({
+      role: "user",
+      content: `[视频检测] ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)}MB)`,
+      videoUrl,
+    });
+
+    // 添加加载占位
+    agentStore.addMessage({
+      role: "assistant",
+      content: "正在上传视频...",
+      loading: true,
+    });
+
+    // 上传视频
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const uploadResult = await detectVideo(formData);
+      const taskId = uploadResult.task_id;
+
+      // 更新加载消息
+      const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+      lastMsg.content = "视频已上传，正在处理中...";
+
+      // 开始轮询进度
+      await pollVideoProgress(taskId);
+    } catch (err) {
+      console.error("[视频检测失败]", err);
+      const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+      lastMsg.content = `视频检测失败：${err.message || err}`;
+      lastMsg.loading = false;
+      lastMsg.error = true;
+    }
+  };
+  input.click();
+}
+
+/**
+ * 轮询视频检测进度
+ * @param {number} taskId - 视频检测任务 ID
+ */
+async function pollVideoProgress(taskId) {
+  const maxRetries = 300; // 最多轮询 300 次（5 分钟 @1s 间隔）
+  let retries = 0;
+
+  return new Promise((resolve, reject) => {
+    const timer = setInterval(async () => {
+      retries++;
+
+      try {
+        const status = await getVideoStatus(taskId);
+
+        const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+
+        if (status.status === "completed") {
+          clearInterval(timer);
+          lastMsg.content = `视频检测完成！共处理 ${status.result?.processed_frames || 0} 帧，发现 ${status.result?.total_objects || 0} 个目标。`;
+          lastMsg.loading = false;
+          lastMsg.detectionResult = {
+            ...status.result,
+            type: "video",
+          };
+          resolve(status);
+        } else if (status.status === "failed") {
+          clearInterval(timer);
+          lastMsg.content = `视频检测失败：${status.message || "未知错误"}`;
+          lastMsg.loading = false;
+          lastMsg.error = true;
+          reject(new Error(status.message));
+        } else {
+          // 仍在处理中
+          lastMsg.content = `视频处理中... ${status.message || ""}`;
+        }
+
+        // 防止超时
+        if (retries >= maxRetries) {
+          clearInterval(timer);
+          const lastMsg = agentStore.messages[agentStore.messages.length - 1];
+          lastMsg.content = "视频处理超时，请稍后在历史记录中查看结果";
+          lastMsg.loading = false;
+          reject(new Error("timeout"));
+        }
+      } catch (err) {
+        console.error("[轮询视频进度失败]", err);
+        // 不立即 reject，继续重试
+      }
+    }, 1000); // 每秒轮询一次
+  });
+}
+
+// 消息对象的数据结构增强
+const createMessage = (role, content = "") => ({
+  id: Date.now() + Math.random(),
+  role, // "user" | "ai"
+  content, // 文本内容
+  toolCalls: [], // 工具调用记录 [{tool, status, summary}]
+  isStreaming: false, // 是否正在流式接收
+  error: null, // 错误信息
+});
+
+// 工具名称映射
+function getToolName(toolKey) {
+  const map = {
+    detect_single_image: "单图检测",
+    detect_batch_images: "批量检测",
+    detect_zip_images_file: "ZIP 检测",
+    detect_video_file: "视频检测",
+    search_knowledge: "知识库检索",
+    query_detection_stats: "统计查询",
+    query_detection_history: "历史查询",
+    query_user_list: "用户查询",
+  };
+  return map[toolKey] || toolKey;
+}
+
+function getAgentNodeName(node) {
+  const map = {
+    supervisor: "Supervisor",
+    detection: "检测 Agent",
+    analysis: "分析 Agent",
+    qa: "问答 Agent",
+    summarize: "汇总",
+  };
+  return map[node] || node;
+}
+
+function getAgentIcon(node) {
+  const icons = {
+    supervisor: Setting,
+    detection: Camera,
+    analysis: PieChart,
+    qa: MessageBox,
+    summarize: CircleCheck,
+  };
+  return icons[node] || CircleCheck;
+}
+
+function getAgentNodeClass(node) {
+  const classes = {
+    supervisor: "node-supervisor",
+    detection: "node-detection",
+    analysis: "node-analysis",
+    qa: "node-qa",
+    summarize: "node-summarize",
+  };
+  return classes[node] || "node-default";
+}
+
+function getAgentStepSummary(step) {
+  const node = step.node;
+  const data = step.data || {};
+
+  if (node === "supervisor") {
+    return `路由决策: ${data.next_agent || "未知"}`;
+  } else if (node === "detection") {
+    const result = data.detection_result || {};
+    if (result.error) return `失败: ${result.error}`;
+    return `检测到 ${result.total_objects || 0} 个目标`;
+  } else if (node === "analysis") {
+    const result = data.analysis_result || {};
+    if (result.error) return `失败: ${result.error}`;
+    return `任务数: ${result.total_tasks || 0}, 目标数: ${result.total_objects || 0}`;
+  } else if (node === "qa") {
+    const result = data.qa_result || {};
+    if (result.error) return `失败: ${result.error}`;
+    if (result.knowledge && result.knowledge.length > 0) {
+      return `检索到 ${result.knowledge.length} 条知识`;
+    }
+    return "知识库中暂无相关内容";
+  } else if (node === "summarize") {
+    return "生成最终回复";
+  }
+  return JSON.stringify(data).slice(0, 50);
+}
+
 onMounted(() => {
   // 页面加载时显示欢迎消息
   if (agentStore.messages.length === 0) {
     agentStore.addMessage({
       role: "assistant",
       content:
-        "你好！我是火灾烟雾智能检测能体助手。\n\n你可以：\n- 上传一张图片，让我帮你检测目标\n- 使用下方的快捷按钮直接触发检测\n- 用自然语言描述你的需求\n\n试试发一张图片给我吧！",
+        "你好！我是 RSOD 目标检测智能体助手。\n\n你可以：\n- 上传一张图片，让我帮你检测目标\n- 使用下方的快捷按钮直接触发检测\n- 用自然语言描述你的需求\n\n试试发一张图片给我吧！",
     });
   }
 });
@@ -557,6 +1071,17 @@ onMounted(() => {
   }
 }
 
+/* ── 视频附件 ── */
+.video-attachment {
+  video {
+    max-width: 280px;
+    max-height: 200px;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    background: #000;
+  }
+}
+
 /* ── 多图附件网格 ── */
 .message-attachments-grid {
   display: grid;
@@ -594,5 +1119,223 @@ onMounted(() => {
     opacity: 1;
     transform: translateY(-4px);
   }
+}
+
+.tool-calls {
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  border: 1px solid #e4e7ed;
+}
+
+.tool-call-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+  color: #606266;
+
+  &.is-loading {
+    color: #409eff;
+  }
+
+  .tool-name {
+    font-weight: 500;
+  }
+
+  .tool-arrow {
+    color: #909399;
+    font-size: 14px;
+    font-weight: bold;
+  }
+
+  .tool-summary {
+    color: #909399;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+    &.success {
+      color: #67c23a;
+      font-weight: 500;
+    }
+
+    &.warning {
+      color: #e6a23c;
+      font-weight: 500;
+    }
+    max-width: 300px;
+  }
+
+  .tool-tags {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tag {
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 4px;
+
+    &.knowledge {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    &.content {
+      background: #e3f2fd;
+      color: #1565c0;
+    }
+
+    &.source {
+      background: #fff8e1;
+      color: #f57c00;
+      font-style: italic;
+    }
+  }
+}
+
+.knowledge-sources {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  border: 1px solid #e4e7ed;
+  font-size: 13px;
+  color: #606266;
+
+  .knowledge-label {
+    font-weight: 500;
+  }
+
+  .tag {
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 4px;
+
+    &.knowledge {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    &.content {
+      background: #e3f2fd;
+      color: #1565c0;
+    }
+
+    &.source {
+      background: #fff8e1;
+      color: #f57c00;
+      font-style: italic;
+    }
+  }
+
+  &.no-knowledge {
+    .no-knowledge-text {
+      color: #909399;
+      margin-left: 4px;
+    }
+  }
+}
+
+.agent-chain {
+  margin: 12px 0;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+}
+
+.agent-chain-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 12px;
+}
+
+.agent-chain-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.agent-chain-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.node-supervisor .agent-node {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+.node-detection .agent-node {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.node-analysis .agent-node {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.node-qa .agent-node {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.node-summarize .agent-node {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.agent-arrow {
+  color: #94a3b8;
+  font-size: 16px;
+}
+
+.agent-chain-details {
+  padding-top: 8px;
+  border-top: 1px dashed #cbd5e1;
+  font-size: 12px;
+}
+
+.agent-step-detail {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.detail-label {
+  color: #64748b;
+  font-weight: 500;
+  min-width: 80px;
+}
+
+.detail-value {
+  color: #334155;
 }
 </style>

@@ -27,3 +27,5 @@ pytest
 pytest-asyncio
 PyYAML==6.0.2
 apscheduler==3.11.0
+langgraph==0.3.0 ← Day 11 多 Agent 编排时使⽤
+openai==1.50.0 ← OpenAI / 通义千问兼容接⼝

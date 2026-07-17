@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
 
     # ── LLM 配置 ──────────────────────────────────────
-    QWEN_API_KEY: str = ""
+    QWEN_API_KEY: str = "sk-ws-H.EDMYIEX.xTuG.MEQCIFSnbaSwin0UOgZRH0fCLFU_VceZXnPADYhPyNrCvzN4AiB0VkBuxvkG8rrhL3Cd9OzkoAeodPZ1J16kFjxkUyUS0g"
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL: str = "qwen-plus"
     USE_LOCAL_LLM: bool = False

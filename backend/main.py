@@ -1,16 +1,23 @@
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config.settings import settings
 from app.api.auth import router as auth_router
+from app.api.training import router as training_router
 from app.api.health import router as health_router
 from app.api.scenes import router as scenes_router
 from app.api.roles import router as roles_router
 from app.api.chat import router as chat_router
+from app.api.history import router as history_router
+from app.api.stats import router as stats_router
+from app.api.detection import router as detection_router
 from app.core.logger import setup_logging, get_logger
 from app.core.exceptions import register_exception_handlers
 from app.middleware.request_logger import RequestLogMiddleware
 from app.middleware.audit_log import AuditLogMiddleware
+from dotenv import load_dotenv
+load_dotenv() 
 
 # ── 初始化日志系统 ────────────────────────────────────
 # 必须在创建 app 之前调用，确保后续所有模块的 logger 都已配置好
@@ -101,13 +108,13 @@ app.add_middleware(AuditLogMiddleware)
 app.include_router(auth_router)
 app.include_router(health_router)
 app.include_router(scenes_router)
-from app.api.training import router as training_router
+
 app.include_router(training_router)
-from app.api.detection import router as detection_router
+
 app.include_router(detection_router)
-from app.api.history import router as history_router
+
 app.include_router(history_router)
-from app.api.stats import router as stats_router
+
 app.include_router(stats_router)
 app.include_router(roles_router)
 app.include_router(chat_router)

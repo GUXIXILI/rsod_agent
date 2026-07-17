@@ -1,90 +1,129 @@
 /**
- * SSE (Server-Sent Events) 流式处理工具
- * 用于 Day 11 智能体对话的流式渲染
+ * SSE 流式处理工具（Day 11 增强版）
  *
- * 使用方式：
- *   const stop = streamChat(
- *     '/api/chat/stream',
- *     { message: '你好' },
- *     {
- *       onMessage: (chunk) => { content += chunk },
- *       onDone: () => { console.log('完成') },
- *       onError: (err) => { console.error(err) },
- *     }
- *   )
+ * 支持两种调用方式：
+ *
+ *   方式 1（Day 11 新 API）：
+ *     await streamChat({ message, image_path, session_id, onTextChunk, onToolStart, ... })
+ *
+ *   方式 2（兼容旧 API，ChatPage.vue 使用）：
+ *     const stop = streamChat("/api/chat/stream", { message, image_path }, { onMessage, onDone, onError })
+ *     返回 abort 函数，调用 stop() 即可中断请求
+ *
+ * 支持的事件类型：
+ *   - thinking    Agent 正在思考
+ *   - tool_start  开始调用工具
+ *   - tool_end    工具调用完成
+ *   - text_chunk  LLM 回复文本片段
+ *   - done        对话完成
+ *   - error       出错
  */
 
 /**
- * 发起 SSE 流式请求
+ * 发起 SSE 流式对话请求（统一入口）
  *
- * @param {string} url - 请求地址（相对路径，会经过 Vite proxy）
- * @param {Object} body - 请求体
- * @param {Object} callbacks - 回调函数
- * @param {Function} callbacks.onMessage - 收到消息片段时的回调
- * @param {Function} callbacks.onDone - 流结束时的回调
- * @param {Function} callbacks.onError - 错误时的回调
- * @returns {Function} stop - 调用此函数可中断连接
+ * 判断逻辑：第一个参数是字符串 → 旧 API；否则 → 新 API
+ *
+ * @param {Object|string} arg1 - options 对象（新 API）或 URL 字符串（旧 API）
+ * @param {Object} [arg2] - 请求体（旧 API）
+ * @param {Object} [arg3] - 回调选项（旧 API）
+ * @returns {Function|Promise} 旧 API 返回 abort 函数，新 API 返回 Promise
  */
-export function streamChat(url, body, callbacks) {
-  const { onMessage, onDone, onError } = callbacks;
+export function streamChat(arg1, arg2, arg3) {
+  if (typeof arg1 === "string") {
+    return _streamChatLegacy(arg1, arg2, arg3);
+  }
+  return _streamChatNew(arg1);
+}
 
-  // 从 localStorage 获取 Token
+/**
+ * 新 API：接收单个 options 对象，返回 Promise
+ */
+async function _streamChatNew(options) {
+  const {
+    message,
+    image_path,
+    session_id,
+    onThinking,
+    onToolStart,
+    onToolEnd,
+    onTextChunk,
+    onDone,
+    onError,
+    signal,
+  } = options;
+
   const token = localStorage.getItem("rsod_token");
 
-  // 使用 fetch + ReadableStream 实现 SSE
-  const controller = new AbortController();
-
-  fetch(url, {
+  const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify(body),
-    signal: controller.signal,
+    body: JSON.stringify({ message, image_path, session_id }),
+    signal,
+  });
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      localStorage.removeItem("rsod_token");
+      localStorage.removeItem("user_info");
+      window.location.href = "/login";
+      return;
+    }
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  await _processStream(response, {
+    thinking: onThinking,
+    tool_start: onToolStart,
+    tool_end: onToolEnd,
+    text_chunk: onTextChunk,
+    done: onDone,
+    error: onError,
+  });
+}
+
+/**
+ * 旧 API：接收 URL + body + callbacks，返回 abort 函数
+ * 兼容 ChatPage.vue 的调用方式
+ */
+function _streamChatLegacy(_url, body, callbacks) {
+  const { message, image_path, image_paths, video_path, session_id } = body || {};
+  const { onMessage, onDone, onError } = callbacks || {};
+
+  const abortController = new AbortController();
+
+  const token = localStorage.getItem("rsod_token");
+
+  fetch(_url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ message, image_path, image_paths, video_path, session_id }),
+    signal: abortController.signal,
   })
     .then(async (response) => {
       if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem("rsod_token");
+          localStorage.removeItem("user_info");
+          window.location.href = "/login";
+          return;
+        }
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
+      await _processStream(response, {
+        // 旧 API 使用统一的 onMessage 处理所有事件
+        _onMessage: onMessage,
+      });
 
-      // 缓冲区：用于拼接跨 chunk 的不完整 SSE 消息
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          // 流结束，处理缓冲区剩余数据
-          if (buffer.trim()) {
-            processSSEMessage(buffer, onMessage);
-          }
-          onDone?.();
-          break;
-        }
-
-        // 解码并追加到缓冲区
-        buffer += decoder.decode(value, { stream: true });
-
-        // 按双换行分割完整的 SSE 消息
-        const messages = buffer.split("\n\n");
-
-        // 最后一个元素可能是不完整的，保留在缓冲区
-        buffer = messages.pop() || "";
-
-        // 处理完整的消息
-        for (const msg of messages) {
-          if (msg.trim()) {
-            const shouldStop = processSSEMessage(msg, onMessage);
-            if (shouldStop) {
-              onDone?.();
-              return;
-            }
-          }
-        }
-      }
+      // 流结束，调用 onDone
+      onDone?.();
     })
     .catch((err) => {
       if (err.name !== "AbortError") {
@@ -92,39 +131,66 @@ export function streamChat(url, body, callbacks) {
       }
     });
 
-  // 返回中断函数
-  return () => controller.abort();
+  // 返回 abort 函数（同步返回）
+  return () => abortController.abort();
 }
 
 /**
- * 处理单条 SSE 消息
- * @param {string} message - 完整的 SSE 消息（可能包含多行 data:）
- * @param {Function} onMessage - 消息回调
- * @returns {boolean} 是否应该停止（遇到 [DONE]）
+ * 处理 SSE 响应流
+ *
+ * @param {Response} response - fetch 响应
+ * @param {Object} handlers - 事件处理函数映射
+ *   handlers._onMessage 存在时使用统一回调模式（旧 API）
+ *   否则使用按类型分发的回调（新 API）
  */
-function processSSEMessage(message, onMessage) {
-  // SSE 消息可能包含多行（data:, event:, id: 等），只处理 data: 行
-  const lines = message.split("\n");
+async function _processStream(response, handlers) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
 
-  for (const line of lines) {
-    if (line.startsWith("data: ")) {
-      const data = line.slice(6); // 去掉 "data: " 前缀
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
 
-      if (data === "[DONE]") {
-        return true;
-      }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop(); // 保留不完整的行
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+
+      const data = line.slice(6).trim();
+      if (data === "[DONE]") return;
 
       try {
-        const parsed = JSON.parse(data);
-        onMessage?.(parsed);
-      } catch {
-        // JSON 解析失败，可能是数据太大或被截断
-        // 尝试作为纯文本处理
-        console.warn("[SSE] JSON解析失败，数据长度:", data.length);
-        onMessage?.({ type: "text_chunk", content: data });
+        const event = JSON.parse(data);
+
+        // 旧 API：统一回调 onMessage
+        if (handlers._onMessage) {
+          handlers._onMessage(event);
+          continue;
+        }
+
+        // 新 API：按类型分发
+        const handler = handlers[event.type];
+        handler?.(event);
+      } catch (_e) {
+        // JSON 解析失败，跳过
       }
     }
   }
-
-  return false;
 }
+
+/**
+ * 工具名称中文映射
+ */
+export const TOOL_NAME_MAP = {
+  detect_single_image: "单图检测",
+  detect_batch_images: "批量检测",
+  detect_zip_images_file: "ZIP 检测",
+  detect_video_file: "视频检测",
+  search_knowledge: "知识库检索",
+  query_detection_stats: "统计查询",
+  query_detection_history: "历史查询",
+  query_user_list: "用户查询",
+};
