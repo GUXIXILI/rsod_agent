@@ -92,6 +92,8 @@ datasets/
 *.bin
 *.zip
 !datasets/rsod/yolo_dataset/data.yaml
+# 保留官方火灾烟雾检测模型，确保 clone 后可直接运行
+!backend/models/fire_smoke_yolo11n_v1/best.pt
 
 _temp_diff.txt
 

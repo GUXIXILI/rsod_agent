@@ -30,6 +30,8 @@ env/
 runs/
 datasets/
 yolo_dataset/
+# 保留官方火灾烟雾检测模型，确保 clone 后可直接运行
+!models/fire_smoke_yolo11n_v1/best.pt
 
 # ── IDE ───────────────────────────────────────────
 .idea/
