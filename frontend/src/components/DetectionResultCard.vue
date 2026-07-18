@@ -1,0 +1,383 @@
+<template>
+  <div v-if="isValidResult" class="detection-result-card">
+    <div class="card-header">
+      <el-icon><DataAnalysis /></el-icon>
+      <span>检测结果</span>
+      <el-tag size="small" type="success">
+        {{ totalObjects }} 个目标
+      </el-tag>
+    </div>
+
+    <div class="card-body">
+      <!-- 单图模式：标注图 -->
+      <div class="result-image" v-if="annotatedImageSrc && !isBatch">
+        <img
+          :src="annotatedImageSrc"
+          alt="检测标注图"
+          @click="showFullImage = true"
+        />
+      </div>
+
+      <!-- 单图模式：无可用标注图占位 -->
+      <div class="result-image-placeholder" v-else-if="!isBatch && result.type !== 'video'">
+        <el-icon><Picture /></el-icon>
+        <span>标注图暂不可用</span>
+      </div>
+
+      <!-- 批量模式：多图展示 -->
+      <div class="result-images-grid" v-if="isBatch && batchImages.length > 0">
+        <div
+          v-for="(img, index) in batchImages"
+          :key="index"
+          class="grid-image"
+          @click="previewImage(img)"
+        >
+          <img :src="img.src" :alt="img.name" />
+          <span class="image-name">{{ img.name }}</span>
+        </div>
+      </div>
+
+      <!-- 视频检测结果：标注视频播放器 -->
+      <div
+        v-if="result.type === 'video'"
+        class="video-result"
+      >
+        <div class="video-info">
+          <el-tag type="info">时长: {{ result.duration_seconds }}s</el-tag>
+          <el-tag type="info">FPS: {{ result.fps }}</el-tag>
+          <el-tag type="info">采样帧: {{ result.processed_frames }}</el-tag>
+          <el-tag type="success">目标: {{ totalObjects }}</el-tag>
+        </div>
+        <div v-if="result.annotated_video_url" class="video-player">
+          <video
+            :src="result.annotated_video_url"
+            controls
+            preload="metadata"
+          ></video>
+        </div>
+        <div v-else-if="result.key_frames" class="frames-fallback">
+          <p class="fallback-hint">标注视频生成中或上传失败，以下为关键帧预览：</p>
+          <div class="frames-container">
+            <div
+              v-for="(frame, index) in thumbnailFrames"
+              :key="index"
+              class="frame-card"
+              @click="previewVideoFrame(frame)"
+            >
+              <img
+                :src="`data:image/jpeg;base64,${frame.annotated_image_base64}`"
+                :alt="`帧 ${frame.frame_index}`"
+              />
+              <div class="frame-info">
+                <span>{{ frame.timestamp }}s</span>
+                <span>{{ frame.object_count }} 个目标</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 统计信息 -->
+      <div class="result-stats">
+        <div class="stat-item">
+          <span class="stat-label">推理耗时</span>
+          <span class="stat-value">{{ result.inference_time || result.total_inference_time || 0 }}ms</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">检测目标</span>
+          <span class="stat-value">{{ totalObjects }} 个</span>
+        </div>
+        <div class="stat-item" v-if="isBatch">
+          <span class="stat-label">图片数量</span>
+          <span class="stat-value">{{ result.total_images ?? batchImages.length }} 张</span>
+        </div>
+
+        <!-- 类别统计表格 -->
+        <el-table
+          v-if="classCountsArray.length > 0"
+          :data="classCountsArray"
+          size="small"
+          style="margin-top: 12px"
+        >
+          <el-table-column prop="className" label="类别" />
+          <el-table-column prop="count" label="数量" width="80" />
+        </el-table>
+      </div>
+    </div>
+
+    <!-- 全屏图片预览 -->
+    <el-dialog v-model="showFullImage" title="检测标注图" width="80%">
+      <img
+        v-if="previewSrc"
+        :src="previewSrc"
+        style="width: 100%"
+        alt="检测标注图"
+      />
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+/**
+ * DetectionResultCard — 检测结果卡片组件
+ *
+ * 在对话消息中展示检测结果，包含：
+ *   - 标注图预览（单图/批量多图，点击可放大）
+ *   - 目标总数和推理耗时
+ *   - 各类别数量统计表格
+ */
+import { DataAnalysis, Picture } from "@element-plus/icons-vue";
+import { computed, ref } from "vue";
+
+const props = defineProps({
+  result: {
+    type: Object,
+    required: true,
+  },
+});
+
+const showFullImage = ref(false);
+const previewSrc = ref(null);
+
+/** 结果是否为合法对象 */
+const isValidResult = computed(() => {
+  return props.result && typeof props.result === 'object';
+});
+
+/** 判断是否为批量检测结果 */
+const isBatch = computed(() => {
+  return Array.isArray(props.result?.annotated_images) && props.result.annotated_images.length > 0;
+});
+
+/** 单图模式：标注图（优先使用 base64，避免 MinIO 预签名 URL 403） */
+const annotatedImageSrc = computed(() => {
+  if (!isValidResult.value) return null;
+  if (props.result.annotated_image_base64) {
+    return `data:image/jpeg;base64,${props.result.annotated_image_base64}`;
+  }
+  if (props.result.annotated_image_url) {
+    return props.result.annotated_image_url;
+  }
+  return null;
+});
+
+/** 批量模式：标注图列表 */
+const batchImages = computed(() => {
+  if (!isBatch.value) return [];
+  return props.result.annotated_images.map((img) => ({
+    name: img.image_path || "image",
+    src: `data:image/jpeg;base64,${img.annotated_image_base64}`,
+  }));
+});
+
+/** 点击预览图片 */
+function previewImage(img) {
+  previewSrc.value = img.src;
+  showFullImage.value = true;
+}
+
+/** 视频模式：缩略帧列表（限制显示数量） */
+const thumbnailFrames = computed(() => {
+  const frames = props.result.key_frames || [];
+  return frames.slice(0, 6);
+});
+
+/** 点击预览视频帧 */
+function previewVideoFrame(frame) {
+  previewSrc.value = `data:image/jpeg;base64,${frame.annotated_image_base64}`;
+  showFullImage.value = true;
+}
+
+/** 目标总数（兼容 total_objects 与 fire_object_count + smoke_object_count） */
+const totalObjects = computed(() => {
+  return props.result.total_objects
+    ?? ((props.result.fire_object_count || 0) + (props.result.smoke_object_count || 0));
+});
+
+/** 类别统计转为数组（用于 el-table，兼容 data.class_counts） */
+const classCountsArray = computed(() => {
+  const counts = props.result.class_counts || props.result.data?.class_counts || {};
+  return Object.entries(counts).map(([className, count]) => ({
+    className,
+    count,
+  }));
+});
+</script>
+
+<style lang="scss" scoped>
+.detection-result-card {
+  margin-top: 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-bottom: 1px solid #e0e0e0;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.card-body {
+  display: flex;
+  gap: 16px;
+  padding: 12px;
+}
+
+.result-image {
+  flex: 1;
+  min-width: 0;
+
+  img {
+    width: 100%;
+    max-height: 300px;
+    object-fit: contain;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+
+    &:hover {
+      opacity: 0.8;
+    }
+  }
+}
+
+.result-image-placeholder {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 160px;
+  background: #fafafa;
+  border: 1px dashed #dcdfe6;
+  border-radius: 4px;
+  color: #909399;
+  font-size: 13px;
+}
+
+.result-images-grid {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+
+  .grid-image {
+    text-align: center;
+    cursor: pointer;
+
+    img {
+      width: 100%;
+      height: 100px;
+      object-fit: cover;
+      border-radius: 4px;
+      border: 1px solid #e0e0e0;
+      transition: opacity 0.2s;
+
+      &:hover {
+        opacity: 0.8;
+      }
+    }
+
+    .image-name {
+      display: block;
+      font-size: 11px;
+      color: #909399;
+      margin-top: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+}
+
+.result-stats {
+  flex: 0 0 180px;
+
+  .stat-item {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+
+  .stat-label {
+    color: #909399;
+  }
+
+  .stat-value {
+    font-weight: 600;
+    color: #303133;
+  }
+}
+
+.video-result {
+  flex: 1;
+  min-width: 0;
+}
+
+.video-info {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.video-player {
+  video {
+    width: 100%;
+    max-height: 360px;
+    border-radius: 8px;
+    background: #000;
+  }
+}
+
+.fallback-hint {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 8px;
+}
+
+.frames-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.frame-card {
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.frame-card:hover {
+  opacity: 0.8;
+}
+
+.frame-card img {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+}
+
+.frame-info {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #666;
+  background: #fafafa;
+}
+</style>

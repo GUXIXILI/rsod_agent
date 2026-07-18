@@ -1,0 +1,104 @@
+# ═══════════════════════════════════════════════════════
+# 基于 YOLOv11 的目标检测智能体平台 — Git 忽略配置
+# ═══════════════════════════════════════════════════════
+
+# ── 环境变量（敏感信息）──────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Python 虚拟环境 ──────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+
+# ── Python 缓存与构建产物 ────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ── 前端依赖与构建产物 ───────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── 日志文件 ─────────────────────────────────────────
+*.log
+logs/
+
+# ── IDE 与编辑器配置 ─────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── 操作系统文件 ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── 测试与覆盖率 ─────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ── TRAE 内部开发记录 ────────────────────────────────
+.trae/
+
+# ── 临时测试文件 ─────────────────────────────────────
+tmp_*.json
+test_chat_detection.py
+test_fire_fix.py
+/tests/
+
+# ── 数据库与缓存 ─────────────────────────────────────
+*.sqlite3
+*.db
+
+# ── 模型权重文件 ──────────────────────────────────────
+*.onnx
+
+# ── 用户上传文件 ──────────────────────────────────────
+uploads/
+backend/static/
+
+# ── 快捷方式 ──────────────────────────────────────────
+scripts/*.lnk
+
+# ── 训练输出和数据集（不提交大文件）──────────────────────
+runs/
+datasets/
+*.pt
+*.pth
+*.pkl
+*.bin
+*.zip
+!datasets/rsod/yolo_dataset/data.yaml
+
+_temp_diff.txt
+

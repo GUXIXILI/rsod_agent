@@ -1,0 +1,299 @@
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from app.config.settings import settings
+from app.api.auth import router as auth_router
+from app.api.health import router as health_router
+from app.api.scenes import router as scenes_router
+from app.api.roles import router as roles_router
+from app.api.chat import router as chat_router
+from app.api.knowledge import router as knowledge_router
+from app.api.video_async import router as video_async_router
+from app.api.camera import router as camera_router
+from app.api.files import router as files_router
+from app.api.admin import router as admin_router
+from app.core.logger import setup_logging, get_logger
+from app.core.exceptions import register_exception_handlers
+from app.middleware.request_logger import RequestLogMiddleware
+from app.middleware.audit_log import AuditLogMiddleware
+from app.middleware.rate_limit import RateLimitMiddleware
+from app.llm_adapter import (
+    find_working_chat_config,
+    find_working_embedding_config,
+)
+
+# ── 初始化日志系统 ────────────────────────────────────
+# 必须在创建 app 之前调用，确保后续所有模块的 logger 都已配置好
+setup_logging()
+
+logger = get_logger(__name__)
+
+
+
+def init_minio():
+    """初始化 MinIO 存储桶（带超时保护，避免 MinIO 不可用时阻塞启动）"""
+    import threading
+    from app.storage.minio_client import MinIOClient
+
+    result = {"success": False, "error": None}
+
+    def _init():
+        try:
+            minio_client = MinIOClient()
+            result["success"] = True
+            print(f"MinIO 存储桶 '{minio_client.bucket_name}' 初始化完成")
+        except Exception as e:
+            result["error"] = str(e)
+
+    thread = threading.Thread(target=_init, daemon=True)
+    thread.start()
+    thread.join(timeout=10)  # 最多等待 10 秒
+
+    if not result["success"]:
+        if result["error"]:
+            print(f"MinIO 初始化失败（已跳过，不影响启动）: {result['error']}")
+        else:
+            print("MinIO 初始化超时（已跳过，不影响启动）")
+
+
+def init_llm_config():
+    """
+    启动时校验 LLM 与 Embedding 配置。
+
+    当 LLM_STUB_MODE=false 时，自动探测对话 API 与 Embedding API 是否可用。
+    若不可用，输出明确原因并降级到占位模式，避免服务因 LLM 鉴权失败而无法响应。
+    """
+    if settings.LLM_STUB_MODE:
+        print("LLM 占位模式已启用，跳过 API 校验")
+        return
+
+    print("正在校验 LLM API 配置...")
+
+    # 校验对话 API
+    chat_key = settings.QWEN_API_KEY or settings.OPENAI_API_KEY
+    chat_url = settings.QWEN_BASE_URL
+    chat_model = settings.QWEN_MODEL
+    chat_ok = False
+    if chat_url and chat_key:
+        result = find_working_chat_config(
+            chat_url,
+            chat_key,
+            preferred_models=[chat_model] if chat_model else [],
+        )
+        if result["success"]:
+            chat_ok = True
+            if result["model"] != chat_model:
+                print(
+                    f"[WARN] 配置的对话模型 '{chat_model}' 不可用，"
+                    f"已自动探测到可用模型 '{result['model']}'"
+                )
+        else:
+            print(f"[WARN] 对话 API 校验失败: {result['error']}")
+    else:
+        print("[WARN] 未配置对话 API Key 或 Base URL")
+
+    # 校验 Embedding API（允许复用对话 key）
+    emb_key = settings.EMBEDDING_API_KEY or chat_key
+    emb_url = settings.EMBEDDING_BASE_URL or chat_url
+    emb_model = settings.EMBEDDING_MODEL
+    emb_ok = False
+    if emb_url and emb_key:
+        result = find_working_embedding_config(
+            emb_url,
+            emb_key,
+            preferred_models=[emb_model] if emb_model else [],
+        )
+        if result["success"]:
+            emb_ok = True
+            if result["model"] != emb_model:
+                print(
+                    f"[WARN] 配置的 Embedding 模型 '{emb_model}' 不可用，"
+                    f"已自动探测到可用模型 '{result['model']}'"
+                )
+        else:
+            print(f"[WARN] Embedding API 校验失败: {result['error']}")
+    else:
+        print("[WARN] 未配置 Embedding API Key 或 Base URL")
+
+    # 任一关键配置不可用时降级到占位模式
+    if not chat_ok:
+        print("[WARN] 对话 LLM 不可用，自动降级到 LLM_STUB_MODE=true")
+        settings.LLM_STUB_MODE = True
+    elif not emb_ok:
+        print("[WARN] Embedding API 不可用，RAG 功能将降级，对话仍使用真实 LLM")
+
+
+def init_knowledge_index():
+    """
+    初始化知识库向量索引
+
+    在应用启动时自动加载 knowledge_base/ 目录下的知识文档，
+    构建向量索引并存储到 pgvector。
+    失败时打印警告但不影响应用启动。
+    """
+    import threading
+
+    result = {"success": False, "error": None}
+
+    def _init():
+        try:
+            from app.rag.retriever import SemanticRetriever
+            retriever = SemanticRetriever()
+            build_result = retriever.build_index()
+            if build_result.get("status") == "success":
+                result["success"] = True
+                print(f"知识库向量索引构建完成: {build_result.get('message', '')}")
+            else:
+                result["error"] = build_result.get("message", "未知错误")
+        except Exception as e:
+            result["error"] = str(e)
+
+    thread = threading.Thread(target=_init, daemon=True)
+    thread.start()
+    thread.join(timeout=30)  # 最多等待 30 秒
+
+    if not result["success"]:
+        if result["error"]:
+            print(f"知识库索引初始化失败（已跳过，不影响启动）: {result['error']}")
+        else:
+            print("知识库索引初始化超时（已跳过，不影响启动）")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时安全检查：非 DEBUG 模式下 JWT 密钥必须配置
+    if not settings.DEBUG and (not settings.JWT_SECRET_KEY or len(settings.JWT_SECRET_KEY) < 32):
+        raise RuntimeError("生产环境 JWT_SECRET_KEY 未配置或长度不足32位，拒绝启动")
+    # 启动时执行
+    print("正在初始化服务...")
+    init_llm_config()
+    init_minio()
+    init_knowledge_index()
+    # 启动定时任务调度器
+    from app.scheduler import start_scheduler, stop_scheduler
+
+    start_scheduler()
+    try:
+        yield
+    finally:
+        # 关闭时执行
+        # 停止定时任务调度器
+        stop_scheduler()
+        print("服务已关闭")
+
+
+# 创建 FastAPI 实例
+app = FastAPI(
+    title="GLW Fire & Smoke Detection Platform",
+    version="2.0.0",
+    description="基于 YOLOv11 的火灾烟雾智能检测预警平台 API",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+)
+
+# ── 注册全局异常处理器 ────────────────────────────────
+# 统一捕获所有异常，返回标准 JSON 格式 {code, message, data}
+register_exception_handlers(app)
+
+# ── CORS 中间件配置 ──────────────────────────────────
+# 允许前端跨域请求后端 API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── 请求日志中间件 ───────────────────────────────────
+# 记录每次 API 请求的进入/离开日志（跳过 /docs、/api/health 等路径）
+app.add_middleware(RequestLogMiddleware)
+
+# ── 操作审计日志中间件 ───────────────────────────────
+# 拦截写操作（POST/PUT/DELETE），异步记录到 operation_logs 表
+app.add_middleware(AuditLogMiddleware)
+
+# ── API 限流中间件 ───────────────────────────────────
+# 基于 Redis 滑动窗口的请求频率限制，Redis 不可用时自动降级放行
+app.add_middleware(RateLimitMiddleware)
+
+# ── 注册路由 ─────────────────────────────────────────
+app.include_router(auth_router)
+app.include_router(health_router)
+app.include_router(scenes_router)
+from app.api.training import router as training_router
+app.include_router(training_router)
+from app.api.detection import router as detection_router
+app.include_router(detection_router)
+from app.api.history import router as history_router
+app.include_router(history_router)
+from app.api.stats import router as stats_router
+app.include_router(stats_router, prefix="/api/stats")
+# 同时注册 /api/dashboard 前缀别名（与讲义要求一致）
+app.include_router(stats_router, prefix="/api/dashboard")
+from app.api.user import router as user_router
+app.include_router(user_router)
+app.include_router(roles_router)
+app.include_router(chat_router)
+app.include_router(knowledge_router)
+app.include_router(video_async_router)
+app.include_router(camera_router)
+app.include_router(files_router)
+app.include_router(admin_router)
+
+
+# ── 托管前端静态文件（SPA 模式）────────────────────────
+import os
+FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+
+# ── 挂载本地 static/ 目录（MinIO 兜底方案的标注图/原图）──
+BACKEND_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.isdir(BACKEND_STATIC_DIR):
+    os.makedirs(BACKEND_STATIC_DIR, exist_ok=True)
+app.mount("/static", StaticFiles(directory=BACKEND_STATIC_DIR), name="static")
+
+if os.path.isdir(FRONTEND_DIST):
+    # 挂载 /assets/ 目录（JS/CSS 等静态资源）
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+
+    # SPA 回退：所有非 API 路径返回 index.html，前端路由自行处理
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # 路径遍历防护：解析真实路径并校验仍在 FRONTEND_DIST 内
+        # 防止 GET /../../etc/passwd 等攻击读取任意文件
+        requested_path = os.path.join(FRONTEND_DIST, full_path)
+        real_requested = os.path.realpath(requested_path)
+        real_dist = os.path.realpath(FRONTEND_DIST)
+        # 若解析后路径不在 FRONTEND_DIST 内，返回 404
+        if os.path.commonpath([real_requested, real_dist]) != real_dist:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        # 如果请求的是文件（有扩展名），尝试直接返回
+        if full_path and os.path.isfile(real_requested):
+            return FileResponse(real_requested)
+        # 否则返回 index.html（SPA 路由）
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+
+    # 根路径也返回前端页面（覆盖后面的 JSON 回退）
+    @app.get("/")
+    async def serve_root():
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+else:
+    # ── 无前端构建产物时的根路径回退 ────────────────────
+    @app.get("/")
+    def root():
+        return {
+            "message": "欢迎使用 GLW 火灾烟雾智能检测系统",
+            "version": "2.0.0",
+            "docs": "/docs",
+            "redoc": "/redoc",
+        }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
