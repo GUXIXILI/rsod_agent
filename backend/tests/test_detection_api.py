@@ -185,3 +185,26 @@ class TestDetectionAlertsAPI:
         response = client.get("/api/detection/alerts", headers=headers)
         assert response.status_code == 200
         assert response.json()["code"] == 200
+
+
+class TestVideoProgressAPI:
+    @patch("app.api.detection.video_task_service")
+    def test_video_progress_uses_resilient_task_service(
+        self, mock_video_task_service, client: TestClient, create_test_user, test_user_data
+    ):
+        mock_video_task_service.get_task_progress.return_value = {
+            "task_id": 12,
+            "progress": 55,
+            "status": "processing",
+        }
+        headers = _get_auth_headers(client, test_user_data)
+
+        response = client.get("/api/detection/video/progress/12", headers=headers)
+
+        assert response.status_code == 200
+        assert response.json()["data"] == {
+            "task_id": 12,
+            "progress": 55,
+            "status": "processing",
+        }
+        mock_video_task_service.get_task_progress.assert_called_once()

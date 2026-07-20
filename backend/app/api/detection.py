@@ -35,6 +35,7 @@ from app.services.fire_smoke_detection_service import (
     video_confirmation_registry,
 )
 from app.services.history_service import history_service
+from app.services.video_task_service import video_task_service
 
 logger = get_logger(__name__)
 
@@ -516,18 +517,14 @@ def get_fire_alerts(
 
 
 @router.get("/video/progress/{task_id}")
-def get_video_progress(task_id: int, current_user=Depends(get_current_user)):
-    """查询视频检测进度"""
-    import redis, json
-    from app.config.settings import settings as app_settings
-    r = redis.Redis(host=app_settings.REDIS_HOST, port=app_settings.REDIS_PORT, db=app_settings.REDIS_DB, decode_responses=True)
-    try:
-        data = r.get(f"video:progress:{task_id}")
-        if data:
-            return {"code": 200, "data": json.loads(data)}
-        return {"code": 200, "data": {"progress": -1, "message": "任务未找到或已完成"}}
-    except Exception:
-        return {"code": 200, "data": {"progress": -1, "message": "Redis 不可用"}}
+def get_video_progress(
+    task_id: int,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """查询视频检测进度，Redis 不可用时回查任务表。"""
+    progress_info = video_task_service.get_task_progress(task_id, db)
+    return {"code": 200, "data": progress_info}
 
 
 # ══════════════════════════════════════════════════════════════

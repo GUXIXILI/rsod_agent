@@ -6,6 +6,8 @@
 - 查询不存在的 task 应返回默认进度
 - 进度字典应正确更新
 """
+import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -54,10 +56,11 @@ class TestGetProgressUnknown:
 class TestProgressTracking:
     """进度字典应正确更新"""
 
-    def test_progress_tracking(self, db_session, create_test_user):
+    def test_progress_tracking(self, db_session, create_test_user, monkeypatch):
         from app.services.video_task_service import VideoTaskService
 
         svc = VideoTaskService()
+        monkeypatch.setattr(svc, "_get_redis_client", lambda: None)
 
         # 模拟手动更新进度
         svc._progress[42] = 0
@@ -68,6 +71,65 @@ class TestProgressTracking:
 
         svc._update_progress(42, 100)
         assert svc.get_task_progress(42)["progress"] == 100
+
+    def test_redis_progress_has_priority_over_database(self, monkeypatch):
+        from app.services.video_task_service import VideoTaskService
+
+        class FakeRedis:
+            def get(self, key):
+                assert key == "video:progress:42"
+                return json.dumps({"progress": 64, "current_frame": 64, "total_frames": 100})
+
+        svc = VideoTaskService()
+        monkeypatch.setattr(svc, "_get_redis_client", lambda: FakeRedis())
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            progress=10, status="processing"
+        )
+
+        progress = svc.get_task_progress(42, db)
+
+        assert progress == {
+            "task_id": 42,
+            "progress": 64,
+            "current_frame": 64,
+            "total_frames": 100,
+            "status": "processing",
+        }
+
+    def test_database_progress_is_used_when_redis_is_unavailable(self, monkeypatch):
+        from app.services.video_task_service import VideoTaskService
+
+        svc = VideoTaskService()
+        monkeypatch.setattr(svc, "_get_redis_client", lambda: None)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            progress=55, status="processing"
+        )
+
+        progress = svc.get_task_progress(42, db)
+
+        assert progress == {"task_id": 42, "progress": 55, "status": "processing"}
+
+    def test_progress_update_writes_to_redis(self, monkeypatch):
+        from app.services.video_task_service import VideoTaskService
+
+        class FakeRedis:
+            def __init__(self):
+                self.values = {}
+
+            def set(self, key, value, ex):
+                self.values[key] = (value, ex)
+
+        fake_redis = FakeRedis()
+        svc = VideoTaskService()
+        monkeypatch.setattr(svc, "_get_redis_client", lambda: fake_redis)
+
+        svc._update_progress(42, 63)
+
+        value, ttl = fake_redis.values["video:progress:42"]
+        assert json.loads(value) == {"progress": 63}
+        assert ttl == svc._PROGRESS_TTL_SECONDS
 
 
 class TestVideoAsyncAPI:

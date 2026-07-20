@@ -22,6 +22,7 @@ router = APIRouter(tags=["camera"])
 
 # 模块级连接计数器
 _active_connections = 0
+_HEARTBEAT_INTERVAL_SECONDS = 20.0
 
 
 @router.websocket("/api/detection/camera")
@@ -57,19 +58,26 @@ async def camera_websocket(websocket: WebSocket):
     fps_counter = 0
     fps_start = time.time()
     fps = 0.0
+    last_pong_at = time.monotonic()
+    heartbeat_task: asyncio.Task | None = None
+
+    async def send_heartbeats() -> None:
+        while True:
+            interval = min(
+                _HEARTBEAT_INTERVAL_SECONDS,
+                max(1.0, float(settings.WEBSOCKET_IDLE_TIMEOUT) / 2),
+            )
+            await asyncio.sleep(interval)
+            if time.monotonic() - last_pong_at >= float(settings.WEBSOCKET_IDLE_TIMEOUT):
+                await websocket.send_json({"type": "error", "message": "heartbeat timeout"})
+                await websocket.close(code=1011, reason="heartbeat timeout")
+                return
+            await websocket.send_json({"type": "ping", "timestamp": int(time.time() * 1000)})
 
     try:
+        heartbeat_task = asyncio.create_task(send_heartbeats())
         while True:
-            # ── Idle 超时：60 秒无帧自动断开 ─────────────────────────────────
-            try:
-                data = await asyncio.wait_for(
-                    websocket.receive_text(),
-                    timeout=float(settings.WEBSOCKET_IDLE_TIMEOUT),
-                )
-            except asyncio.TimeoutError:
-                await websocket.send_json({"type": "error", "message": "idle timeout"})
-                logger.info("WebSocket 摄像头 idle 超时断开")
-                break
+            data = await websocket.receive_text()
 
             # ── 解析消息 ─────────────────────────────────────────────────────
             try:
@@ -79,6 +87,9 @@ async def camera_websocket(websocket: WebSocket):
                 continue
 
             msg_type = msg.get("type", "")
+            if msg_type == "pong":
+                last_pong_at = time.monotonic()
+                continue
 
             # ── Config 消息：配置检测参数 + 模型预热 ──────────────────────────
             if msg_type == "config":
@@ -184,7 +195,13 @@ async def camera_websocket(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        _active_connections -= 1
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        _active_connections = max(0, _active_connections - 1)
         logger.info(
             "WebSocket 摄像头连接已关闭: active=%d", _active_connections
         )

@@ -5,12 +5,14 @@
 - submit_video_task: 创建 DetectionTask + 启动后台处理线程
 - get_task_progress: 查询任务进度（内存字典 + DB 兜底）
 """
+import json
 import threading
 from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.config.settings import settings
 from app.core.logger import get_logger
 from app.database.session import SessionLocal
 from app.entity.db_models import DetectionTask
@@ -21,6 +23,8 @@ logger = get_logger(__name__)
 
 class VideoTaskService:
     """视频异步任务管理，使用内存字典 + 线程锁管理进度"""
+
+    _PROGRESS_TTL_SECONDS = 3600
 
     def __init__(self):
         self._progress: dict = {}       # {task_id: progress_int}
@@ -57,9 +61,8 @@ class VideoTaskService:
 
         task_id = task.id
 
-        # 2. 初始化内存进度
-        with self._lock:
-            self._progress[task_id] = 0
+        # 2. 初始化 Redis 和内存进度
+        self._update_progress(task_id, 0)
 
         # 3. 启动后台线程
         thread = threading.Thread(
@@ -74,23 +77,28 @@ class VideoTaskService:
         return task
 
     def get_task_progress(self, task_id: int, db: Optional[Session] = None) -> dict:
-        """查询任务进度，优先从内存字典取，取不到则查 DB"""
+        """按 Redis、数据库、内存的顺序查询任务进度。"""
+        redis_progress = self._read_redis_progress(task_id)
+        if redis_progress is not None:
+            result = {"task_id": task_id, **redis_progress}
+            if db is not None:
+                task = db.query(DetectionTask).filter(DetectionTask.id == task_id).first()
+                if task and task.status:
+                    result["status"] = task.status
+            return result
+
+        # Redis 缺失或进程重启后，回查持久化任务表。
+        if db is not None:
+            task = db.query(DetectionTask).filter(DetectionTask.id == task_id).first()
+            if task:
+                return {"task_id": task_id, "progress": int(task.progress or 0), "status": task.status or "unknown"}
+
         # 内存查询
         with self._lock:
             progress = self._progress.get(task_id)
 
         if progress is not None:
             return {"task_id": task_id, "progress": progress}
-
-        # DB 兜底查询
-        if db is not None:
-            task = db.query(DetectionTask).filter(DetectionTask.id == task_id).first()
-            if task:
-                return {
-                    "task_id": task_id,
-                    "progress": task.progress or 0,
-                    "status": task.status,
-                }
 
         return {"task_id": task_id, "progress": 0}
 
@@ -113,6 +121,10 @@ class VideoTaskService:
         try:
             # 更新进度：开始处理
             self._update_progress(task_id, 10)
+            original_task = thread_db.query(DetectionTask).filter(DetectionTask.id == task_id).first()
+            if original_task:
+                original_task.progress = 10
+                thread_db.commit()
 
             # 调用现有 detect_video（它会创建独立 session）
             task = detection_service.detect_video(
@@ -125,6 +137,7 @@ class VideoTaskService:
                 iou_threshold=iou_threshold,
                 image_size=image_size,
                 frame_skip=frame_skip,
+                progress_task_id=task_id,
             )
 
             # 检测完成 → 更新原始 processing 任务的状态
@@ -162,8 +175,8 @@ class VideoTaskService:
                 if original_task:
                     original_task.status = "failed"
                     original_task.error_message = str(e)
-                    original_task.progress = 0
                     thread_db.commit()
+                self._delete_redis_progress(task_id)
             except Exception:
                 logger.exception("更新任务失败状态也出错: task_id=%s", task_id)
                 thread_db.rollback()
@@ -173,9 +186,55 @@ class VideoTaskService:
             # 这里不立即删除，让前端有机会查询最终状态
 
     def _update_progress(self, task_id: int, progress: int):
-        """更新内存进度"""
+        """更新内存兜底和 Redis 进度。"""
+        progress = max(0, min(100, int(progress)))
         with self._lock:
             self._progress[task_id] = progress
+        client = self._get_redis_client()
+        if client is None:
+            return
+        try:
+            client.set(
+                f"video:progress:{task_id}",
+                json.dumps({"progress": progress}),
+                ex=self._PROGRESS_TTL_SECONDS,
+            )
+        except Exception:
+            logger.warning("写入视频任务 Redis 进度失败: task_id=%s", task_id)
+
+    def _get_redis_client(self):
+        try:
+            import redis
+            client = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=settings.REDIS_DB, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+            client.ping()
+            return client
+        except Exception:
+            return None
+
+    def _read_redis_progress(self, task_id: int) -> dict | None:
+        client = self._get_redis_client()
+        if client is None:
+            return None
+        try:
+            raw = client.get(f"video:progress:{task_id}")
+            data = json.loads(raw) if raw else None
+            if isinstance(data, dict) and "progress" in data:
+                data["progress"] = int(data["progress"])
+                return data
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("视频任务 Redis 进度格式无效: task_id=%s", task_id)
+        except Exception:
+            pass
+        return None
+
+    def _delete_redis_progress(self, task_id: int) -> None:
+        client = self._get_redis_client()
+        if client is None:
+            return
+        try:
+            client.delete(f"video:progress:{task_id}")
+        except Exception:
+            logger.warning("删除视频任务 Redis 进度失败: task_id=%s", task_id)
 
 
 # 单例
