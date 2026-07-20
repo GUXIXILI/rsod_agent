@@ -23,21 +23,24 @@
             :disabled="agentStore.isLoading"
             @click="handleQuickDetect('single')"
           >
-            📷 单图检测
+            <el-icon><Picture /></el-icon>
+            图片检测
           </el-button>
           <el-button
             size="small"
             :disabled="agentStore.isLoading"
             @click="handleQuickDetect('batch')"
           >
-            📁 批量/ZIP
+            <el-icon><Folder /></el-icon>
+            批量检测
           </el-button>
           <el-button
             size="small"
             :disabled="agentStore.isLoading"
             @click="handleVideoDetect"
           >
-            🎬 视频
+            <el-icon><VideoCamera /></el-icon>
+            视频检测
           </el-button>
         </div>
       </div>
@@ -808,6 +811,8 @@ onMounted(async () => {
 $chat-sidebar-top-height: 57px;
 $chat-header-height: 52px;
 $chat-input-area-height: 80px;
+$color-main-dark: #a9a6a2;
+$color-main-light: #dcc9b7;
 
 .chat-page {
   display: flex;
@@ -865,7 +870,7 @@ $chat-input-area-height: 80px;
 }
 
 .header-title {
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 600;
   color: #303133;
 }
@@ -873,6 +878,18 @@ $chat-input-area-height: 80px;
 .header-actions {
   display: flex;
   gap: 8px;
+
+  :deep(.el-button) {
+    font-size: 14px;
+    color: $color-main-dark;
+    border-color: $color-main-dark;
+
+    &:hover {
+      background-color: rgba(169, 166, 162, 0.1);
+      border-color: $color-main-dark;
+      color: $color-main-dark;
+    }
+  }
 }
 
 /* ── 消息列表 ── */
@@ -895,19 +912,19 @@ $chat-input-area-height: 80px;
 }
 
 .welcome-icon {
-  color: #c0c4cc;
+  color: $color-main-dark;
   margin-bottom: 16px;
 }
 
 .welcome-area h2 {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 600;
   color: #303133;
   margin: 0 0 8px;
 }
 
 .welcome-desc {
-  font-size: 14px;
+  font-size: 15px;
   color: #909399;
   margin: 0 0 32px;
 }
@@ -925,15 +942,15 @@ $chat-input-area-height: 80px;
   background: #fff;
   border: 1px solid #e4e7ed;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 14px;
   color: #606266;
   cursor: pointer;
   transition: all 0.2s;
 
   &:hover {
-    border-color: #409eff;
-    color: #409eff;
-    background: #ecf5ff;
+    border-color: $color-main-dark;
+    color: $color-main-dark;
+    background: rgba(169, 166, 162, 0.08);
   }
 }
 
@@ -958,14 +975,15 @@ $chat-input-area-height: 80px;
 }
 
 .message-bubble {
-  padding: 12px 16px;
+  padding: 14px 18px;
   border-radius: 12px;
   line-height: 1.6;
   word-break: break-word;
+  font-size: 15px;
 }
 
 .user-bubble {
-  background: #409eff;
+  background: linear-gradient(135deg, $color-main-dark, $color-main-light);
   color: #fff;
   border-bottom-right-radius: 4px;
 }
@@ -1052,7 +1070,7 @@ $chat-input-area-height: 80px;
   span {
     width: 8px;
     height: 8px;
-    background: #409eff;
+    background: $color-main-dark;
     border-radius: 50%;
     animation: thinkingPulse 1.2s infinite;
   }
@@ -1066,7 +1084,7 @@ $chat-input-area-height: 80px;
 }
 
 .thinking-text {
-  font-size: 13px;
+  font-size: 14px;
   color: #909399;
   font-style: italic;
 }
@@ -1106,7 +1124,7 @@ $chat-input-area-height: 80px;
   align-items: center;
   gap: 8px;
   padding: 6px 0;
-  font-size: 13px;
+  font-size: 14px;
   &:not(:last-child) {
     border-bottom: 1px dashed #e8e8e8;
   }
@@ -1116,8 +1134,8 @@ $chat-input-area-height: 80px;
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #409eff;
-  font-size: 13px;
+  color: $color-main-dark;
+  font-size: 14px;
 }
 
 .tool-completed {
@@ -1125,7 +1143,7 @@ $chat-input-area-height: 80px;
   align-items: center;
   gap: 6px;
   color: #67c23a;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .tool-failed {
@@ -1133,11 +1151,11 @@ $chat-input-area-height: 80px;
   align-items: center;
   gap: 6px;
   color: #f56c6c;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .tool-result-detail {
-  font-size: 12px;
+  font-size: 13px;
   color: #606266;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1156,13 +1174,13 @@ $chat-input-area-height: 80px;
 .agent-chain {
   margin-top: 12px;
   padding: 8px 12px;
-  background: #f0f7ff;
+  background: rgba(169, 166, 162, 0.08);
   border-radius: 8px;
-  border: 1px solid #d0e3ff;
+  border: 1px solid rgba(169, 166, 162, 0.15);
 }
 
 .agent-chain-title {
-  font-size: 12px;
+  font-size: 13px;
   color: #909399;
   margin-bottom: 6px;
 }
@@ -1175,15 +1193,15 @@ $chat-input-area-height: 80px;
 }
 
 .agent-chain-step {
-  font-size: 12px;
+  font-size: 13px;
   padding: 2px 8px;
   border-radius: 4px;
-  background: #e8f0fe;
-  color: #409eff;
+  background: rgba(169, 166, 162, 0.1);
+  color: $color-main-dark;
   font-weight: 500;
 
   &.agent-chain-step-running {
-    background: #409eff;
+    background: $color-main-dark;
     color: #fff;
     animation: agentPulse 1.2s infinite;
   }
@@ -1214,7 +1232,7 @@ $chat-input-area-height: 80px;
 }
 
 .knowledge-sources-title {
-  font-size: 12px;
+  font-size: 13px;
   color: #909399;
   margin-bottom: 6px;
 }
@@ -1224,7 +1242,7 @@ $chat-input-area-height: 80px;
   justify-content: space-between;
   align-items: center;
   padding: 4px 0;
-  font-size: 12px;
+  font-size: 13px;
 
   &:not(:last-child) {
     border-bottom: 1px dashed #e8e8e8;
@@ -1232,7 +1250,7 @@ $chat-input-area-height: 80px;
 }
 
 .knowledge-source-name {
-  color: #409eff;
+  color: $color-main-dark;
   max-width: 70%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1242,5 +1260,62 @@ $chat-input-area-height: 80px;
 .knowledge-source-similarity {
   color: #909399;
   flex-shrink: 0;
+}
+:deep(.el-button--primary) {
+  background-color: #dcc9b7;    
+  border-color: #dcc9b7;
+  color: #303133;
+  &:hover {
+    background-color: #c9b59f; 
+    border-color: #c9b59f;
+  }
+  &:active {
+    background-color: #b8a38c;
+    border-color: #b8a38c;
+  }
+}
+
+:deep(.el-button--primary.is-text) {
+  color: #dcc9b7;
+  background: transparent;
+  border: none;
+  &:hover {
+    color: #c9b59f;
+  }
+  &:active {
+    color: #b8a38c;
+  }
+}
+
+:deep(.el-button--default) {
+  &:hover {
+    color: #dcc9b7;
+    border-color: #dcc9b7;
+  }
+  &:active {
+    color: #b8a38c;
+    border-color: #b8a38c;
+  }
+}
+
+:deep(.el-button.is-active) {
+  background-color: #dcc9b7;
+  border-color: #dcc9b7;
+  color: #303133;
+}
+
+:deep(.session-item.active) {
+  background-color: #dcc9b7 !important;
+  color: #303133 !important;
+  border-left: 3px solid #a9a6a2 !important;
+}
+
+:deep(.el-menu-item.is-active) {
+  background-color: #dcc9b7 !important;
+  color: #303133 !important;
+  border-left: 3px solid #a9a6a2 !important;
+}
+.user-bubble .message-content {
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 </style>

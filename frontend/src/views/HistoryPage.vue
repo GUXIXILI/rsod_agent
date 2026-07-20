@@ -595,4 +595,60 @@ onMounted(() => {
 .image-error .el-icon {
   font-size: 32px;
 }
+
+/* ============================================
+   覆盖 Element Plus 蓝色/天蓝色主题
+   使用自定义颜色 #a9a6a2 (主色) 和 #dcc9b7 (辅色)
+   ============================================ */
+
+/* 主按钮 (Primary) */
+:deep(.el-button--primary) {
+  background-color: #a9a6a2 !important;
+  border-color: #a9a6a2 !important;
+}
+:deep(.el-button--primary:hover),
+:deep(.el-button--primary:focus) {
+  background-color: #dcc9b7 !important;
+  border-color: #dcc9b7 !important;
+}
+:deep(.el-button--primary.is-link) {
+  color: #a9a6a2 !important;
+  background: transparent !important;
+  border: none !important;
+}
+:deep(.el-button--primary.is-link:hover),
+:deep(.el-button--primary.is-link:focus) {
+  color: #dcc9b7 !important;
+}
+
+/* Info 标签 (原本为蓝色) */
+:deep(.el-tag--info) {
+  background-color: #dcc9b7 !important;
+  border-color: #dcc9b7 !important;
+  color: #303133 !important;
+}
+/* 深色 effect 的 info 标签 */
+:deep(.el-tag--info.el-tag--dark) {
+  background-color: #a9a6a2 !important;
+  border-color: #a9a6a2 !important;
+  color: #fff !important;
+}
+
+/* 分页器激活页码与悬停 */
+:deep(.el-pagination .el-pager .number.active) {
+  background-color: #a9a6a2 !important;
+  color: #fff !important;
+}
+:deep(.el-pagination .el-pager .number:hover) {
+  color: #a9a6a2 !important;
+}
+
+/* 输入框焦点边框 (包括 select, date-picker) */
+:deep(.el-input__wrapper.is-focus),
+:deep(.el-select .el-input__wrapper.is-focus),
+:deep(.el-date-editor .el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px #a9a6a2 inset !important;
+}
+
+/* 表格中可能出现的蓝色链接或激活色 (如排序箭头) 未覆盖，但非强制 */
 </style>

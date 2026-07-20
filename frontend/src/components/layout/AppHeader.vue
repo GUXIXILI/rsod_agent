@@ -7,7 +7,7 @@
         <!-- Logo 占位图标，后续可替换为实际 Logo 图片 -->
         <span class="app-header__logo-icon">RS</span>
       </div>
-      <h1 class="app-header__title">RSOD Agent Platform</h1>
+      <h1 class="app-header__title">火灾烟雾智能检测系统</h1>
     </div>
 
     <!-- 中部：全局横向导航菜单 -->
@@ -50,7 +50,7 @@
         <!-- 触发元素：用户头像 + 用户名 -->
         <span class="app-header__user">
           <el-avatar
-            :size="32"
+            :size="36"
             class="app-header__avatar"
           >
             {{ (userStore.username || 'U').charAt(0).toUpperCase() }}
@@ -141,6 +141,11 @@ const handleCommand = async (command) => {
 </script>
 
 <style lang="scss" scoped>
+/* 主题主色 */
+$color-main-dark: #a9a6a2;
+$color-main-light: #dcc9b7;
+$header-height: 70px;
+
 /* 顶部导航栏 —— 固定定位在最顶部 */
 .app-header {
   position: fixed;
@@ -160,7 +165,7 @@ const handleCommand = async (command) => {
   &__brand {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     flex-shrink: 0;
   }
 
@@ -169,24 +174,24 @@ const handleCommand = async (command) => {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
+    width: 42px;
+    height: 42px;
     border-radius: 6px;
-    background: linear-gradient(135deg, #409eff, #67c23a);
+    background: linear-gradient(135deg, $color-main-dark, $color-main-light);
     flex-shrink: 0;
   }
 
   &__logo-icon {
     color: #fff;
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 700;
     letter-spacing: 1px;
   }
 
-  /* 平台名称 */
+  /* 平台名称 - 放大字体 */
   &__title {
     margin: 0;
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 600;
     color: #303133;
     white-space: nowrap;
@@ -204,18 +209,24 @@ const handleCommand = async (command) => {
     :deep(.el-menu-item) {
       height: $header-height;
       line-height: $header-height;
-      font-size: 14px;
+      padding: 0 20px;
+      font-size: 16px;
       color: #606266;
 
       &:hover {
-        color: #409eff;
+        color: $color-main-dark;
         background-color: transparent;
       }
 
       &.is-active {
-        color: #409eff;
+        color: $color-main-dark !important;
         background-color: transparent;
-        border-bottom: 2px solid #409eff;
+        border-bottom: 3px solid $color-main-dark;
+      }
+
+      /* 同时修改内部图标颜色，避免残留蓝色 */
+      &.is-active .el-icon {
+        color: $color-main-dark;
       }
     }
   }
@@ -237,15 +248,15 @@ const handleCommand = async (command) => {
     user-select: none;
   }
 
-  /* 用户头像 */
+  /* 用户头像 - 加大尺寸 + 主题渐变 */
   &__avatar {
-    background-color: #409eff;
+    background: linear-gradient(135deg, $color-main-dark, $color-main-light) !important;
     flex-shrink: 0;
   }
 
-  /* 用户名 */
+  /* 用户名 - 放大字体 */
   &__username {
-    font-size: 14px;
+    font-size: 15px;
     color: #303133;
     max-width: 120px;
     overflow: hidden;
@@ -256,7 +267,7 @@ const handleCommand = async (command) => {
   /* 下拉箭头 */
   &__arrow {
     font-size: 12px;
-    color: #909399;
+    color: $color-main-dark;
     transition: transform 0.2s ease;
   }
 }

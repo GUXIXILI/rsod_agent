@@ -199,7 +199,7 @@
         <el-table-column prop="class_name" label="类别" width="200" />
         <el-table-column prop="ap50" label="AP@50" width="120">
           <template #default="{ row }">
-            <span :style="{ color: row.ap50 < 0.5 ? '#f56c6c' : '#67c23a' }">
+            <span :style="{ color: row.ap50 < 0.5 ? '#a9a6a2' : '#dcc9b7' }">
               {{ (row.ap50 * 100).toFixed(1) }}%
             </span>
           </template>
@@ -669,21 +669,24 @@ function updateCharts(metrics) {
           type: "line",
           data: metrics.map((m) => m.box_loss),
           smooth: true,
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2, color: "#a9a6a2" },
+          itemStyle: { color: "#a9a6a2" }
         },
         {
           name: "Cls Loss",
           type: "line",
           data: metrics.map((m) => m.cls_loss),
           smooth: true,
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2, color: "#dcc9b7" },
+          itemStyle: { color: "#dcc9b7" }
         },
         {
           name: "DFL Loss",
           type: "line",
           data: metrics.map((m) => m.dfl_loss),
           smooth: true,
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2, color: "#a9a6a2" },
+          itemStyle: { color: "#a9a6a2" }
         },
       ],
     });
@@ -711,32 +714,32 @@ function updateCharts(metrics) {
           type: "line",
           data: metrics.map((m) => m.map50),
           smooth: true,
-          lineStyle: { width: 2, color: "#409eff" },
-          itemStyle: { color: "#409eff" },
+          lineStyle: { width: 2, color: "#a9a6a2" },
+          itemStyle: { color: "#a9a6a2" },
         },
         {
           name: "mAP@50-95",
           type: "line",
           data: metrics.map((m) => m.map50_95),
           smooth: true,
-          lineStyle: { width: 2, color: "#67c23a" },
-          itemStyle: { color: "#67c23a" },
+          lineStyle: { width: 2, color: "#dcc9b7" },
+          itemStyle: { color: "#dcc9b7" },
         },
         {
           name: "Precision",
           type: "line",
           data: metrics.map((m) => m.precision),
           smooth: true,
-          lineStyle: { width: 2, type: "dashed", color: "#e6a23c" },
-          itemStyle: { color: "#e6a23c" },
+          lineStyle: { width: 2, type: "dashed", color: "#a9a6a2" },
+          itemStyle: { color: "#a9a6a2" },
         },
         {
           name: "Recall",
           type: "line",
           data: metrics.map((m) => m.recall),
           smooth: true,
-          lineStyle: { width: 2, type: "dashed", color: "#f56c6c" },
-          itemStyle: { color: "#f56c6c" },
+          lineStyle: { width: 2, type: "dashed", color: "#dcc9b7" },
+          itemStyle: { color: "#dcc9b7" },
         },
       ],
     });
@@ -838,22 +841,22 @@ const evalMetricCards = computed(() => {
     {
       label: "Precision",
       value: (o.precision * 100).toFixed(1) + "%",
-      color: o.precision > 0.7 ? "#67c23a" : "#e6a23c",
+      color: o.precision > 0.7 ? "#dcc9b7" : "#a9a6a2",
     },
     {
       label: "Recall",
       value: (o.recall * 100).toFixed(1) + "%",
-      color: o.recall > 0.7 ? "#67c23a" : "#e6a23c",
+      color: o.recall > 0.7 ? "#dcc9b7" : "#a9a6a2",
     },
     {
       label: "mAP@50",
       value: (o.map50 * 100).toFixed(1) + "%",
-      color: o.map50 > 0.5 ? "#67c23a" : "#f56c6c",
+      color: o.map50 > 0.5 ? "#dcc9b7" : "#a9a6a2",
     },
     {
       label: "mAP@50-95",
       value: (o.map50_95 * 100).toFixed(1) + "%",
-      color: o.map50_95 > 0.3 ? "#67c23a" : "#f56c6c",
+      color: o.map50_95 > 0.3 ? "#dcc9b7" : "#a9a6a2",
     },
   ];
 });
@@ -1123,6 +1126,22 @@ onBeforeUnmount(() => {
 }
 
 :deep(.weak-row td) {
-  color: #f56c6c !important;
+  color: #a9a6a2 !important;
+}
+
+:deep(.el-button--primary) {
+  --el-button-bg-color: #dcc9b7;
+  --el-button-text-color: #333;
+  --el-button-border-color: #dcc9b7;
+  --el-button-hover-bg-color: #a9a6a2;
+  --el-button-hover-border-color: #a9a6a2;
+}
+
+:deep(.el-progress__text) {
+  color: #a9a6a2;
+}
+
+:deep(.el-progress-bar__inner) {
+  background-color: #dcc9b7;
 }
 </style>

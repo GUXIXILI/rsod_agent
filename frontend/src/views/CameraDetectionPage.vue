@@ -40,6 +40,48 @@
           </div>
         </div>
 
+        <!-- 控制栏 (已移至视频正下方) -->
+        <div class="control-bar">
+          <el-button
+            v-if="!isRunning"
+            type="primary"
+            size="large"
+            @click="startCamera"
+            :loading="isConnecting"
+          >
+            开启摄像头
+          </el-button>
+          <el-button v-else type="danger" size="large" @click="stopCamera">
+            停止检测
+          </el-button>
+          <el-button v-if="isRunning" type="success" size="large" @click="generateReport">
+            生成报告
+          </el-button>
+
+          <el-divider direction="vertical" />
+
+          <!-- GPU/CPU 模式选择 -->
+          <span class="control-label">推理模式：</span>
+          <el-radio-group v-model="detectMode" :disabled="isRunning">
+            <el-radio-button label="cpu" value="cpu">CPU 节能</el-radio-button>
+            <el-radio-button label="gpu" value="gpu">GPU 加速</el-radio-button>
+          </el-radio-group>
+
+          <el-divider direction="vertical" />
+
+          <!-- 置信度阈值 -->
+          <span class="control-label">置信度：</span>
+          <el-slider
+            v-model="confThreshold"
+            :min="0.1"
+            :max="0.9"
+            :step="0.05"
+            :disabled="isRunning"
+            style="width: 150px"
+            show-input
+          />
+        </div>
+
         <!-- 视频状态标签行 -->
         <div v-if="isRunning" class="video-stats">
           <el-tag type="success">FPS: {{ currentFps }}</el-tag>
@@ -158,48 +200,6 @@
         </el-card>
       </div>
     </div>
-
-    <!-- 控制栏 -->
-    <div class="control-bar">
-      <el-button
-        v-if="!isRunning"
-        type="primary"
-        size="large"
-        @click="startCamera"
-        :loading="isConnecting"
-      >
-        开启摄像头
-      </el-button>
-      <el-button v-else type="danger" size="large" @click="stopCamera">
-        停止检测
-      </el-button>
-      <el-button v-if="isRunning" type="success" size="large" @click="generateReport">
-        生成报告
-      </el-button>
-
-      <el-divider direction="vertical" />
-
-      <!-- GPU/CPU 模式选择 -->
-      <span class="control-label">推理模式：</span>
-      <el-radio-group v-model="detectMode" :disabled="isRunning">
-        <el-radio-button label="cpu" value="cpu">CPU 节能</el-radio-button>
-        <el-radio-button label="gpu" value="gpu">GPU 加速</el-radio-button>
-      </el-radio-group>
-
-      <el-divider direction="vertical" />
-
-      <!-- 置信度阈值 -->
-      <span class="control-label">置信度：</span>
-      <el-slider
-        v-model="confThreshold"
-        :min="0.1"
-        :max="0.9"
-        :step="0.05"
-        :disabled="isRunning"
-        style="width: 150px"
-        show-input
-      />
-    </div>
   </div>
 </template>
 
@@ -216,47 +216,35 @@
  *   - 实时统计：FPS、目标数、推理耗时、帧数、类别分布
  *   - 火情预警通知
  *   - 编码 Canvas 复用（不每次创建新 Canvas）
- *
- * 按照讲义 Day09 Section 8 的三区布局设计：
- *   左侧 — 视频预览区（隐藏 video + 可见 canvas）
- *   右侧 — 检测结果区（统计卡片 + 目标列表 + 类别分布）
- *   底部 — 控制栏（开启/停止 + 模式切换 + 置信度滑块）
  */
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { computed, onBeforeUnmount, ref } from 'vue'
 
-// ── DOM 引用 ──
 const videoRef = ref(null)
 const canvasRef = ref(null)
 const encodeCanvasRef = ref(null)
 
-// ── 摄像头状态 ──
 const isRunning = ref(false)
 const isConnecting = ref(false)
 
-// ── 检测配置 ──
 const detectMode = ref('cpu')
 const confThreshold = ref(0.25)
 
-// ── 实时统计 ──
 const currentFps = ref(0)
 const frameCount = ref(0)
 const inferenceTime = ref(0)
 const objectCount = ref(0)
 const currentDetections = ref([])
 
-// ── 火情预警 ──
 const fireLevel = ref('safe')
 const fireCount = ref(0)
 const smokeCount = ref(0)
 const lastAlertTime = ref('')
 
-// ── 非响应式变量 ──
 let ws = null
 let mediaStream = null
 let lastFireLevel = 'safe'
 
-// ── 计算属性 ──
 const statusText = computed(() => {
   if (isConnecting.value) return '连接中...'
   if (isRunning.value) return '运行中'
@@ -272,7 +260,6 @@ const statusTagType = computed(() => {
 const classDistribution = computed(() => {
   const dist = {}
   for (const det of currentDetections.value) {
-    // 兼容多种字段名
     const name = det.class_name || det.class || det.name || det.label || 'unknown'
     dist[name] = (dist[name] || 0) + 1
   }
@@ -292,22 +279,18 @@ const alertLevelText = computed(() => {
   return map[fireLevel.value] || fireLevel.value
 })
 
-// ── 开启摄像头 ──
 async function startCamera() {
   try {
     isConnecting.value = true
 
-    // 1. 获取摄像头权限（320x240 低分辨率优化）
     mediaStream = await navigator.mediaDevices.getUserMedia({
       video: { width: 320, height: 240, facingMode: 'environment' },
       audio: false,
     })
 
-    // 2. 将媒体流绑定到隐藏的 video 元素
     videoRef.value.srcObject = mediaStream
     await videoRef.value.play()
 
-    // 3. 建立 WebSocket 连接
     connectWebSocket()
 
     isRunning.value = true
@@ -319,7 +302,6 @@ async function startCamera() {
   }
 }
 
-// ── 建立 WebSocket 连接 ──
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
@@ -331,8 +313,6 @@ function connectWebSocket() {
   ws.onopen = () => {
     console.log('[WebSocket] 连接已建立')
 
-    // 发送 config 配置消息
-    // CPU 模式 image_size=320（优化），GPU 模式 image_size=640
     const imageSize = detectMode.value === 'cpu' ? 320 : 640
     ws.send(JSON.stringify({
       type: 'config',
@@ -349,26 +329,21 @@ function connectWebSocket() {
       const data = JSON.parse(event.data)
 
       if (data.type === 'result') {
-        // 更新统计信息
         currentFps.value = data.fps || 0
         frameCount.value = data.frame_count || 0
         inferenceTime.value = data.inference_time || 0
         objectCount.value = data.object_count || 0
         currentDetections.value = data.detections || []
 
-        // 渲染标注帧到 Canvas
         if (data.annotated_frame) {
           renderAnnotatedFrame(data.annotated_frame)
         }
 
-        // 火情预警数据
         fireLevel.value = data.fire_level || 'safe'
         fireCount.value = data.fire_count || 0
         smokeCount.value = data.smoke_count || 0
         lastAlertTime.value = new Date().toLocaleTimeString()
 
-        // 火情预警通知
-        // 注意：局部变量命名为 detectedLevel，避免与顶层 ref fireLevel 同名导致 TDZ bug
         const detectedLevel = data.fire_level || ''
         if (detectedLevel !== lastFireLevel && ['notice', 'warning', 'danger'].includes(detectedLevel)) {
           lastFireLevel = detectedLevel
@@ -382,7 +357,6 @@ function connectWebSocket() {
         }
       } else if (data.type === 'config_ok') {
         console.log('[WebSocket] 配置确认:', data.message)
-        // 响应驱动：收到 config_ok 后发送第一帧
         requestAnimationFrame(sendSingleFrame)
       } else if (data.type === 'error') {
         console.error('[WebSocket] 服务端错误:', data.message)
@@ -405,7 +379,6 @@ function connectWebSocket() {
   }
 }
 
-// ── 发送单帧（响应驱动，收到 result 渲染后调用） ──
 function sendSingleFrame() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return
   if (!videoRef.value || videoRef.value.readyState < 2) return
@@ -413,12 +386,10 @@ function sendSingleFrame() {
   const encodeCanvas = encodeCanvasRef.value
   const targetSize = detectMode.value === 'cpu' ? 320 : 640
 
-  // 复用编码 Canvas，调整尺寸
   encodeCanvas.width = targetSize
   encodeCanvas.height = targetSize
   const ctx = encodeCanvas.getContext('2d')
 
-  // 居中裁剪绘制
   const vw = videoRef.value.videoWidth
   const vh = videoRef.value.videoHeight
   const scale = Math.min(targetSize / vw, targetSize / vh)
@@ -426,7 +397,6 @@ function sendSingleFrame() {
   const y = (targetSize - vh * scale) / 2
   ctx.drawImage(videoRef.value, x, y, vw * scale, vh * scale)
 
-  // JPEG 0.45 压缩
   const dataUrl = encodeCanvas.toDataURL('image/jpeg', 0.45)
   const base64Data = dataUrl.split(',')[1]
 
@@ -437,7 +407,6 @@ function sendSingleFrame() {
   }))
 }
 
-// ── 渲染标注帧到 Canvas ──
 function renderAnnotatedFrame(annotatedBase64) {
   if (!canvasRef.value) return
 
@@ -449,22 +418,18 @@ function renderAnnotatedFrame(annotatedBase64) {
     canvas.height = img.height
     ctx.drawImage(img, 0, 0)
 
-    // 响应驱动：渲染完成后发送下一帧
     requestAnimationFrame(sendSingleFrame)
   }
   img.src = `data:image/jpeg;base64,${annotatedBase64}`
 }
 
-// ── 停止摄像头 ──
 function stopCamera() {
-  // 关闭 WebSocket
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'close' }))
     ws.close()
     ws = null
   }
 
-  // 停止摄像头
   if (mediaStream) {
     mediaStream.getTracks().forEach((track) => track.stop())
     mediaStream = null
@@ -474,7 +439,6 @@ function stopCamera() {
     videoRef.value.srcObject = null
   }
 
-  // 重置状态
   isRunning.value = false
   isConnecting.value = false
   currentFps.value = 0
@@ -484,7 +448,6 @@ function stopCamera() {
   currentDetections.value = []
   lastFireLevel = 'safe'
 
-  // 清空 Canvas
   if (canvasRef.value) {
     const ctx = canvasRef.value.getContext('2d')
     ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
@@ -493,7 +456,6 @@ function stopCamera() {
   ElMessage.info('摄像头已停止')
 }
 
-// ── 生成报告 ──
 function generateReport() {
   const lines = [
     '===== 摄像头检测报告 =====',
@@ -550,7 +512,6 @@ function generateReport() {
   })
 }
 
-// ── 组件销毁时清理 ──
 onBeforeUnmount(() => {
   stopCamera()
 })
@@ -558,11 +519,19 @@ onBeforeUnmount(() => {
 
 <style lang="scss" scoped>
 .detection-page {
+  /* 仅替换 Element Plus 的核心蓝色为目标色 */
+  --el-color-primary: #a9a6a2;
+  --el-color-primary-light-3: #bab7b4;
+  --el-color-primary-light-5: #cac8c6;
+  --el-color-primary-light-7: #dcc9b7;
+  --el-color-primary-light-9: #f3f0ed;
+  --el-color-primary-dark-2: #8a8784;
+
   display: flex;
   flex-direction: column;
   height: 100%;
   padding: 20px;
-  background: #f5f5f5;
+  background: #f5f5f5; /* 保持原有的背景色 */
 }
 
 .page-header {
@@ -623,6 +592,21 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+/* 控制栏 (移动到了视频正下方) */
+.control-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0;
+  margin-top: 8px;
+}
+
+.control-label {
+  font-size: 14px;
+  color: #666;
+  white-space: nowrap;
+}
+
 /* 右侧结果区 */
 .result-panel {
   flex: 2;
@@ -648,7 +632,7 @@ onBeforeUnmount(() => {
 .stat-value {
   font-size: 24px;
   font-weight: 700;
-  color: #409eff;
+  color: #a9a6a2; /* 将原本的蓝色 #409eff 替换为目标色 */
 }
 
 .stat-label {
@@ -747,21 +731,5 @@ onBeforeUnmount(() => {
 .alert-value {
   font-weight: 600;
   font-size: 14px;
-}
-
-/* 控制栏 */
-.control-bar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 16px 0;
-  border-top: 1px solid #e0e0e0;
-  margin-top: 16px;
-}
-
-.control-label {
-  font-size: 14px;
-  color: #666;
-  white-space: nowrap;
 }
 </style>

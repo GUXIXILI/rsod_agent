@@ -259,6 +259,16 @@ onMounted(() => {
 <style scoped>
 .settings-page {
   padding: 20px;
+  
+  /* Overrides for Element Plus primary colors (replaces default blue/light blue) */
+  /* 覆盖 Element Plus 默认主色调（将蓝色和浅蓝色替换为自定义颜色） */
+  --el-color-primary: #a9a6a2;
+  --el-color-primary-light-3: #b8bcb9;
+  --el-color-primary-light-5: #dcc9b7; 
+  --el-color-primary-light-7: #e9dbce;
+  --el-color-primary-light-8: #efe5da;
+  --el-color-primary-light-9: #f6eee5;
+  --el-color-primary-dark-2: #878581;
 }
 
 .page-header {
