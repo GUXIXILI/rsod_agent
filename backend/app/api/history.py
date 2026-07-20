@@ -7,9 +7,10 @@
 - DELETE /api/history/tasks/{task_id} — 删除检测记录
 """
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
@@ -17,6 +18,11 @@ from app.database.session import get_db
 from app.services.history_service import history_service
 
 router = APIRouter(prefix="/api/history", tags=["history"])
+
+
+class BatchDeleteRequest(BaseModel):
+    """批量删除请求"""
+    task_ids: List[int] = Field(..., min_length=1, description="待删除的任务 ID 列表")
 
 
 @router.get("/tasks")
@@ -68,6 +74,21 @@ def delete_history_task(
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="检测任务不存在或无权删除")
     return {"code": 200, "message": "删除成功"}
+
+
+@router.post("/tasks/batch-delete")
+def batch_delete_history_tasks(
+    request: BatchDeleteRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """批量删除检测记录（仅删除当前用户自己的记录）"""
+    result = history_service.delete_tasks_batch(db, request.task_ids, current_user.id)
+    return {
+        "code": 200,
+        "message": f"已删除 {result['deleted']} 条记录",
+        "data": result,
+    }
 
 
 @router.get("/summary")

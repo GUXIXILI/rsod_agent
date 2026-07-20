@@ -12,12 +12,17 @@
 class FireLevelService:
     """火情等级判定服务"""
 
+    # 低置信度阈值：低于此值的检测结果视为可能的误报
+    LOW_CONFIDENCE_THRESHOLD = 0.3
+
     def judge(
         self,
         fire_count: int = 0,
         smoke_count: int = 0,
         fire_area: float = 0.0,
         smoke_area: float = 0.0,
+        avg_fire_confidence: float = 0.0,
+        avg_smoke_confidence: float = 0.0,
     ) -> dict:
         """
         根据检测结果判定火情等级
@@ -27,6 +32,8 @@ class FireLevelService:
             smoke_count: 烟雾目标数量
             fire_area: 火焰面积占比 0~1
             smoke_area: 烟雾面积占比 0~1
+            avg_fire_confidence: 火焰平均置信度（用于过滤低置信度误报）
+            avg_smoke_confidence: 烟雾平均置信度（用于过滤低置信度误报）
 
         Returns:
             dict: {
@@ -44,7 +51,11 @@ class FireLevelService:
         elif fire_area > 0.03 or fire_count >= 1:
             level = "warning"
         elif smoke_area > 0.05 or smoke_count >= 2:
-            level = "notice"
+            # 低置信度烟雾可能为误报，不触发 notice
+            if avg_smoke_confidence < self.LOW_CONFIDENCE_THRESHOLD and fire_count == 0:
+                level = "safe"
+            else:
+                level = "notice"
         else:
             level = "safe"
 

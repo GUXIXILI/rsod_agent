@@ -8,6 +8,7 @@
 - query_detection_history：查询检测历史记录（分页、筛选）
 """
 
+import json
 from typing import Optional
 
 from langchain_core.tools import tool
@@ -42,43 +43,45 @@ def query_detection_stats() -> str:
         fire_distribution = stats_service.get_fire_level_distribution(db, user_id=1)
         trend = stats_service.get_trend(db, user_id=1, days=7)
 
-        lines = [
-            "【检测统计概览】",
-            "",
-            "📊 总览数据：",
-            f"  - 总检测次数：{overview['total_detections']}",
-            f"  - 检出火焰：{overview['fire_detected']} 次",
-            f"  - 检出烟雾：{overview['smoke_detected']} 次",
-            f"  - 触发预警：{overview['warning_count']} 次",
-            "",
-        ]
+        level_names = {
+            "safe": "安全",
+            "notice": "注意",
+            "warning": "警告",
+            "danger": "危险",
+        }
 
-        if fire_distribution:
-            lines.append("🔥 火情等级分布：")
-            level_names = {
-                "safe": "安全",
-                "notice": "注意",
-                "warning": "警告",
-                "danger": "危险",
+        result = {
+            "tool": "query_detection_stats",
+            "status": "success",
+            "summary": f"总检测 {overview['total_detections']} 次，检出火焰 {overview['fire_detected']} 次，检出烟雾 {overview['smoke_detected']} 次，触发预警 {overview['warning_count']} 次",
+            "data": {
+                "overview": {
+                    "total_detections": overview["total_detections"],
+                    "fire_detected": overview["fire_detected"],
+                    "smoke_detected": overview["smoke_detected"],
+                    "warning_count": overview["warning_count"],
+                },
+                "fire_distribution": [
+                    {
+                        "fire_level": item["fire_level"],
+                        "fire_level_cn": level_names.get(item["fire_level"], item["fire_level"]),
+                        "count": item["count"],
+                    }
+                    for item in fire_distribution
+                ],
+                "trend": [
+                    {
+                        "date": item["date"],
+                        "count": item["count"],
+                    }
+                    for item in trend
+                ],
             }
-            for item in fire_distribution:
-                level_cn = level_names.get(item["fire_level"], item["fire_level"])
-                lines.append(f"  - {level_cn}（{item['fire_level']}）：{item['count']} 次")
-            lines.append("")
-
-        if trend:
-            lines.append("📈 最近 7 天检测趋势：")
-            for item in trend:
-                lines.append(f"  - {item['date']}：{item['count']} 次")
-            lines.append("")
-
-        if overview["warning_count"] > 0:
-            lines.append("⚠️ 提示：历史记录中存在预警记录，请关注高风险时段。")
-
-        return "\n".join(lines)
+        }
+        return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as e:
         logger.exception("统计查询工具调用失败")
-        return f"统计查询失败：{str(e)}"
+        return json.dumps({"tool": "query_detection_stats", "status": "error", "summary": f"统计查询失败：{str(e)}", "data": None}, ensure_ascii=False, default=str)
     finally:
         db.close()
 
@@ -124,28 +127,34 @@ def query_detection_history(
             "danger": "危险",
         }
 
-        lines = [
-            f"【检测历史记录】（第 {page} 页，共 {max(1, (total + page_size - 1) // page_size)} 页）",
-            f"总记录数：{total}",
-            "",
-        ]
+        total_pages = max(1, (total + page_size - 1) // page_size)
 
-        if not items:
-            lines.append("暂无检测记录。")
-        else:
-            for i, item in enumerate(items, 1):
-                level_cn = level_names.get(item.get("fire_level", ""), item.get("fire_level", "未知"))
-                lines.append(
-                    f"{i}. [{item['task_type']}] {item['file_name']} "
-                    f"| 火情：{level_cn} "
-                    f"| 火焰：{item.get('fire_object_count', 0)} "
-                    f"烟雾：{item.get('smoke_object_count', 0)} "
-                    f"| {str(item.get('created_at', ''))[:19]}"
-                )
-
-        return "\n".join(lines)
+        result = {
+            "tool": "query_detection_history",
+            "status": "success",
+            "summary": f"第 {page} 页，共 {total_pages} 页，总记录数 {total}",
+            "data": {
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "items": [
+                    {
+                        "task_type": item.get("task_type"),
+                        "file_name": item.get("file_name"),
+                        "fire_level": item.get("fire_level"),
+                        "fire_level_cn": level_names.get(item.get("fire_level", ""), item.get("fire_level", "未知")),
+                        "fire_object_count": item.get("fire_object_count", 0),
+                        "smoke_object_count": item.get("smoke_object_count", 0),
+                        "created_at": str(item.get("created_at", ""))[:19] if item.get("created_at") else None,
+                    }
+                    for item in items
+                ],
+            }
+        }
+        return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as e:
         logger.exception("历史查询工具调用失败")
-        return f"历史查询失败：{str(e)}"
+        return json.dumps({"tool": "query_detection_history", "status": "error", "summary": f"历史查询失败：{str(e)}", "data": None}, ensure_ascii=False, default=str)
     finally:
         db.close()

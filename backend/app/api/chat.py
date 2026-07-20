@@ -223,6 +223,25 @@ def rename_session(
     return {"code": 200, "message": "重命名成功"}
 
 
+@router.post("/multi-agent")
+async def send_message_multi_agent(
+    request: ChatMessageRequest,
+    current_user=Depends(get_current_user),
+):
+    """多Agent SSE 流式发送消息（LangGraph Supervisor 路由架构）"""
+    return StreamingResponse(
+        chat_service.send_message_stream_multi_agent(
+            current_user.id, request, request.session_id
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/detect-shortcut")
 async def detect_shortcut(
     image: UploadFile = File(...),

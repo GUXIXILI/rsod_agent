@@ -28,6 +28,7 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(50), unique=True, nullable=False, index=True, comment="用户名")
+    nickname = Column(String(50), nullable=True, comment="昵称（用户自定义显示名）")
     email = Column(String(100), unique=True, nullable=False, index=True, comment="邮箱")
     hashed_password = Column(String(255), nullable=False, comment="加密密码")
     phone = Column(String(20), nullable=True, comment="手机号")

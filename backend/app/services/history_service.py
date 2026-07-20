@@ -130,6 +130,35 @@ class HistoryService:
         db.commit()
         return True
 
+    def delete_tasks_batch(self, db: Session, task_ids: list, user_id: int) -> dict:
+        """批量删除检测记录（仅删除属于当前用户的记录）
+
+        返回 {"requested": 请求数, "deleted": 实际删除数, "not_found": 未找到/无权的ID列表}。
+        使用 ORM 逐条删除以触发 detection_results 的级联删除。
+        """
+        if not task_ids:
+            return {"requested": 0, "deleted": 0, "not_found": []}
+        # 去重并保持为整数
+        unique_ids = list({int(i) for i in task_ids})
+        tasks = (
+            db.query(DetectionTask)
+            .filter(
+                DetectionTask.id.in_(unique_ids),
+                DetectionTask.user_id == user_id,
+            )
+            .all()
+        )
+        found_ids = {t.id for t in tasks}
+        for task in tasks:
+            db.delete(task)
+        db.commit()
+        not_found = [i for i in unique_ids if i not in found_ids]
+        return {
+            "requested": len(unique_ids),
+            "deleted": len(found_ids),
+            "not_found": not_found,
+        }
+
     def get_summary(self, db: Session, user_id: int) -> dict:
         """获取历史记录汇总"""
         from sqlalchemy import func

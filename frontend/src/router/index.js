@@ -97,20 +97,32 @@ const router = createRouter({
 
 // ==================== 全局前置守卫 ====================
 
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to, from, next) => {
   // 1. 设置页面标题
   document.title = to.meta.title
     ? `${to.meta.title} - Fire & Smoke Detection Platform`
     : 'Fire & Smoke Detection Platform'
 
-  // 2. 从 localStorage 直接读取 token，避免在守卫中导入 Pinia store 导致循环依赖
-  const token = localStorage.getItem('rsod_token')
-
-  // 3. 未登录访问需要认证的页面 → 跳转登录页，携带 redirect 参数供登录后回跳
-  if (to.meta.requiresAuth !== false && !token) {
-    next({ path: '/login', query: { redirect: to.fullPath } })
-    return
+  // 2. BUG-007: 登录后 token 写入 localStorage 存在时序延迟
+  //    需要认证但 token 为空时，轮询等待 token 就绪（最多 2 秒）
+  if (to.meta.requiresAuth !== false) {
+    let token = localStorage.getItem('rsod_token')
+    if (!token) {
+      // 轮询等待 token 写入（最多 20 次 × 100ms = 2 秒）
+      for (let i = 0; i < 20; i++) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+        token = localStorage.getItem('rsod_token')
+        if (token) break
+      }
+    }
+    if (!token) {
+      next({ path: '/login', query: { redirect: to.fullPath } })
+      return
+    }
   }
+
+  // 3. 从 localStorage 直接读取 token，避免在守卫中导入 Pinia store 导致循环依赖
+  const token = localStorage.getItem('rsod_token')
 
   // 4. 已登录访问登录/注册页 → 跳转首页（会自动重定向到 /chat）
   if (token && (to.path === '/login' || to.path === '/register')) {

@@ -46,9 +46,10 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = ""
     MINIO_BUCKET: str = "fire-detection-images"
     MINIO_SECURE: bool = False
+    MINIO_REGION: str = "us-east-1"
 
     # ── LLM 配置 ──────────────────────────────────────
-    LLM_STUB_MODE: bool = True
+    LLM_STUB_MODE: bool = False
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL: str = "qwen-plus"
     USE_LOCAL_LLM: bool = False

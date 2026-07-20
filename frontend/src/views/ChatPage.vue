@@ -23,21 +23,24 @@
             :disabled="agentStore.isLoading"
             @click="handleQuickDetect('single')"
           >
-            📷 单图检测
+            <el-icon><Picture /></el-icon>
+            图片检测
           </el-button>
           <el-button
             size="small"
             :disabled="agentStore.isLoading"
             @click="handleQuickDetect('batch')"
           >
-            📁 批量/ZIP
+            <el-icon><Folder /></el-icon>
+            批量检测
           </el-button>
           <el-button
             size="small"
             :disabled="agentStore.isLoading"
             @click="handleVideoDetect"
           >
-            🎬 视频
+            <el-icon><VideoCamera /></el-icon>
+            视频检测
           </el-button>
         </div>
       </div>
@@ -150,6 +153,36 @@
                 </div>
               </div>
 
+              <!-- 多Agent调用链 -->
+              <div v-if="msg.agentChain && msg.agentChain.length > 0" class="agent-chain">
+                <div class="agent-chain-title">智能体调用链</div>
+                <div class="agent-chain-steps">
+                  <span
+                    v-for="(step, sIdx) in msg.agentChain"
+                    :key="sIdx"
+                    :class="['agent-chain-step', `agent-chain-step-${step.status}`]"
+                  >
+                    {{ step.current }}
+                    <span v-if="sIdx < msg.agentChain.length - 1" class="agent-chain-arrow">→</span>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 知识来源 -->
+              <div v-if="msg.knowledgeSources && msg.knowledgeSources.length > 0" class="knowledge-sources">
+                <div class="knowledge-sources-title">知识来源</div>
+                <div
+                  v-for="(source, kIdx) in msg.knowledgeSources"
+                  :key="kIdx"
+                  class="knowledge-source-item"
+                >
+                  <span class="knowledge-source-name">{{ source.title || source.source }}</span>
+                  <span class="knowledge-source-similarity">
+                    相似度: {{ (source.similarity * 100).toFixed(0) }}%
+                  </span>
+                </div>
+              </div>
+
               <!-- 错误 + 重试 -->
               <div v-if="msg.error" class="error-actions">
                 <el-button type="warning" size="small" @click="retryLastMessage">
@@ -249,6 +282,12 @@ async function handleSend({ text, files }) {
   if (!text && (!files || files.length === 0)) return
 
   const message = text || ''
+
+  // 参数校验：content 长度不能超过 5000 字符
+  if (message.length > 5000) {
+    ElMessage.warning(`消息内容过长（${message.length}/5000），请精简后重试`)
+    return
+  }
   let uploadedFiles = []
 
   // Step 1: 如果有文件，先上传到后端
@@ -324,7 +363,6 @@ async function handleSend({ text, files }) {
 
   const stop = streamChat('/api/chat/messages/stream', requestBody, {
     onMessage: (data) => {
-      console.log('[SSE事件]', data.type, data)
       const lastMsg = agentStore.getLastAssistantMessage()
       if (!lastMsg) return
 
@@ -344,7 +382,7 @@ async function handleSend({ text, files }) {
           if (!lastMsg.toolCalls) lastMsg.toolCalls = []
           lastMsg.toolCalls.push({
             tool: data.tool || '未知工具',
-            input: data.input,
+            input: data.input || data.args,
             status: 'running',
             startTime: Date.now(),
           })
@@ -358,16 +396,25 @@ async function handleSend({ text, files }) {
               runningTc.status = 'completed'
               runningTc.result = data.result
               try {
-                const result = JSON.parse(data.result)
-                if (result.detections) {
+                const result = data.result ? JSON.parse(data.result) : {}
+                if (result.error) {
+                  runningTc.status = 'failed'
+                  runningTc.resultSummary = result.error
+                  const errorText = `检测失败：${result.error}`
+                  lastMsg.content = lastMsg.content ? `${lastMsg.content}\n${errorText}` : errorText
+                  lastMsg.loading = false
+                } else if (Array.isArray(result.detections)) {
                   runningTc.resultSummary = `检测到 ${(result.fire_object_count || 0) + (result.smoke_object_count || 0)} 个目标`
                   lastMsg.detectionResult = result
                   lastMsg.loading = false
                 } else {
                   runningTc.resultSummary = JSON.stringify(result).substring(0, 200)
                 }
-              } catch {
+              } catch (parseErr) {
+                // 工具返回非 JSON 格式（如纯文本），直接展示原文
+                runningTc.status = 'completed'
                 runningTc.resultSummary = (data.result || '').substring(0, 200)
+                console.warn('[tool_end] JSON解析失败，以纯文本展示:', (data.result || '').substring(0, 100))
               }
             }
           }
@@ -406,32 +453,66 @@ async function handleSend({ text, files }) {
         case 'tool_call':
           lastMsg.thinking = false
           lastMsg.loading = true
-          lastMsg.toolCall = { tool: data.tool, input: data.input }
+          lastMsg.toolCall = { tool: data.tool, input: data.input || data.args }
           if (!lastMsg.toolCalls) lastMsg.toolCalls = []
           lastMsg.toolCalls.push({
             tool: data.tool,
-            input: data.input,
+            input: data.input || data.args,
             status: 'running',
             startTime: Date.now(),
           })
           break
 
-        case 'tool_result':
+        case 'tool_result': {
+          let toolResult = null
           if (lastMsg.toolCalls && lastMsg.toolCalls.length > 0) {
             const runningTc = [...lastMsg.toolCalls].reverse().find((tc) => tc.status === 'running')
             if (runningTc) {
               runningTc.status = 'completed'
               runningTc.result = data.result
+              toolResult = runningTc
             }
           }
           try {
-            const result = JSON.parse(data.result)
-            if (result.detections) {
+            const result = data.result ? JSON.parse(data.result) : {}
+            if (result.error) {
+              if (toolResult) toolResult.status = 'failed'
+              const errorText = `检测失败：${result.error}`
+              lastMsg.content = lastMsg.content ? `${lastMsg.content}\n${errorText}` : errorText
+              lastMsg.loading = false
+            } else if (Array.isArray(result.detections)) {
+              if (toolResult) {
+                toolResult.resultSummary = `检测到 ${(result.fire_object_count || 0) + (result.smoke_object_count || 0)} 个目标`
+              }
               lastMsg.detectionResult = result
               lastMsg.loading = false
+            } else if (toolResult) {
+              toolResult.resultSummary = JSON.stringify(result).substring(0, 200)
             }
-          } catch (e) {
-            lastMsg.content += `\n[工具结果: ${data.result?.substring(0, 100)}...]`
+          } catch (parseErr) {
+            if (toolResult) {
+              toolResult.status = 'completed'
+              toolResult.resultSummary = (data.result || '').substring(0, 200)
+            }
+            console.warn('[tool_result] JSON解析失败，以纯文本展示:', (data.result || '').substring(0, 100))
+          }
+          break
+        }
+
+        case 'agent_chain':
+          // 多Agent调用链事件
+          if (!lastMsg.agentChain) lastMsg.agentChain = []
+          lastMsg.agentChain.push({
+            current: data.current,
+            status: data.status,
+            timestamp: Date.now(),
+          })
+          break
+
+        case 'knowledge_sources':
+          // 知识来源事件
+          if (data.sources && Array.isArray(data.sources)) {
+            lastMsg.knowledgeSources = data.sources
           }
           break
 
@@ -715,7 +796,11 @@ async function pollVideoProgress(taskId) {
 }
 
 onMounted(async () => {
-  await agentStore.fetchSessions()
+  // 等待 token 就绪后再请求会话列表，避免 401 竞态（BUG-007）
+  const token = localStorage.getItem('rsod_token')
+  if (token) {
+    await agentStore.fetchSessions()
+  }
   if (agentStore.messages.length === 0) {
     // 欢迎消息在模板中通过 v-if 处理
   }
@@ -723,11 +808,37 @@ onMounted(async () => {
 </script>
 
 <style lang="scss" scoped>
+$chat-sidebar-top-height: 57px;
+$chat-header-height: 52px;
+$chat-input-area-height: 80px;
+$color-main-dark: #a9a6a2;
+$color-main-light: #dcc9b7;
+
 .chat-page {
   display: flex;
-  height: 100%;
+  width: calc(100% + 40px);
+  height: calc(100vh - $header-height);
+  margin: -20px;
   background: #f5f6f7;
   overflow: hidden;
+
+  /* 左侧会话列表：宽度固定 260px，独立滚动 */
+  :deep(.chat-sidebar) {
+    width: 260px;
+    flex-shrink: 0;
+    height: 100%;
+    background: #fff;
+    border-right: 1px solid #e4e7ed;
+    display: flex;
+    flex-direction: column;
+  }
+
+  :deep(.session-list) {
+    height: calc(100vh - $header-height - $chat-sidebar-top-height);
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
 }
 
 /* ── 主对话区域 ── */
@@ -736,7 +847,9 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  height: 100%;
   background: #f5f6f7;
+  overflow: hidden;
 }
 
 /* ── 顶部栏 ── */
@@ -745,7 +858,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
-  height: 52px;
+  height: $chat-header-height;
   background: #fff;
   border-bottom: 1px solid #e4e7ed;
   flex-shrink: 0;
@@ -757,7 +870,7 @@ onMounted(async () => {
 }
 
 .header-title {
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 600;
   color: #303133;
 }
@@ -765,11 +878,25 @@ onMounted(async () => {
 .header-actions {
   display: flex;
   gap: 8px;
+
+  :deep(.el-button) {
+    font-size: 14px;
+    color: $color-main-dark;
+    border-color: $color-main-dark;
+
+    &:hover {
+      background-color: rgba(169, 166, 162, 0.1);
+      border-color: $color-main-dark;
+      color: $color-main-dark;
+    }
+  }
 }
 
 /* ── 消息列表 ── */
 .message-list {
-  flex: 1;
+  height: calc(100vh - $header-height - $chat-header-height - $chat-input-area-height);
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 20px 16px;
 }
@@ -785,19 +912,19 @@ onMounted(async () => {
 }
 
 .welcome-icon {
-  color: #c0c4cc;
+  color: $color-main-dark;
   margin-bottom: 16px;
 }
 
 .welcome-area h2 {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 600;
   color: #303133;
   margin: 0 0 8px;
 }
 
 .welcome-desc {
-  font-size: 14px;
+  font-size: 15px;
   color: #909399;
   margin: 0 0 32px;
 }
@@ -815,15 +942,15 @@ onMounted(async () => {
   background: #fff;
   border: 1px solid #e4e7ed;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 14px;
   color: #606266;
   cursor: pointer;
   transition: all 0.2s;
 
   &:hover {
-    border-color: #409eff;
-    color: #409eff;
-    background: #ecf5ff;
+    border-color: $color-main-dark;
+    color: $color-main-dark;
+    background: rgba(169, 166, 162, 0.08);
   }
 }
 
@@ -848,14 +975,15 @@ onMounted(async () => {
 }
 
 .message-bubble {
-  padding: 12px 16px;
+  padding: 14px 18px;
   border-radius: 12px;
   line-height: 1.6;
   word-break: break-word;
+  font-size: 15px;
 }
 
 .user-bubble {
-  background: #409eff;
+  background: linear-gradient(135deg, $color-main-dark, $color-main-light);
   color: #fff;
   border-bottom-right-radius: 4px;
 }
@@ -942,7 +1070,7 @@ onMounted(async () => {
   span {
     width: 8px;
     height: 8px;
-    background: #409eff;
+    background: $color-main-dark;
     border-radius: 50%;
     animation: thinkingPulse 1.2s infinite;
   }
@@ -956,7 +1084,7 @@ onMounted(async () => {
 }
 
 .thinking-text {
-  font-size: 13px;
+  font-size: 14px;
   color: #909399;
   font-style: italic;
 }
@@ -996,7 +1124,7 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   padding: 6px 0;
-  font-size: 13px;
+  font-size: 14px;
   &:not(:last-child) {
     border-bottom: 1px dashed #e8e8e8;
   }
@@ -1006,8 +1134,8 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #409eff;
-  font-size: 13px;
+  color: $color-main-dark;
+  font-size: 14px;
 }
 
 .tool-completed {
@@ -1015,7 +1143,7 @@ onMounted(async () => {
   align-items: center;
   gap: 6px;
   color: #67c23a;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .tool-failed {
@@ -1023,11 +1151,11 @@ onMounted(async () => {
   align-items: center;
   gap: 6px;
   color: #f56c6c;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .tool-result-detail {
-  font-size: 12px;
+  font-size: 13px;
   color: #606266;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1040,5 +1168,154 @@ onMounted(async () => {
   margin-top: 12px;
   display: flex;
   gap: 8px;
+}
+
+/* ── 多Agent调用链 ── */
+.agent-chain {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(169, 166, 162, 0.08);
+  border-radius: 8px;
+  border: 1px solid rgba(169, 166, 162, 0.15);
+}
+
+.agent-chain-title {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 6px;
+}
+
+.agent-chain-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-chain-step {
+  font-size: 13px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(169, 166, 162, 0.1);
+  color: $color-main-dark;
+  font-weight: 500;
+
+  &.agent-chain-step-running {
+    background: $color-main-dark;
+    color: #fff;
+    animation: agentPulse 1.2s infinite;
+  }
+
+  &.agent-chain-step-completed {
+    background: #e8f5e9;
+    color: #67c23a;
+  }
+}
+
+.agent-chain-arrow {
+  color: #c0c4cc;
+  margin: 0 2px;
+}
+
+@keyframes agentPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* ── 知识来源 ── */
+.knowledge-sources {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: #fafafa;
+  border-radius: 8px;
+  border: 1px solid #f0f0f0;
+}
+
+.knowledge-sources-title {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 6px;
+}
+
+.knowledge-source-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 13px;
+
+  &:not(:last-child) {
+    border-bottom: 1px dashed #e8e8e8;
+  }
+}
+
+.knowledge-source-name {
+  color: $color-main-dark;
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-source-similarity {
+  color: #909399;
+  flex-shrink: 0;
+}
+:deep(.el-button--primary) {
+  background-color: #dcc9b7;    
+  border-color: #dcc9b7;
+  color: #303133;
+  &:hover {
+    background-color: #c9b59f; 
+    border-color: #c9b59f;
+  }
+  &:active {
+    background-color: #b8a38c;
+    border-color: #b8a38c;
+  }
+}
+
+:deep(.el-button--primary.is-text) {
+  color: #dcc9b7;
+  background: transparent;
+  border: none;
+  &:hover {
+    color: #c9b59f;
+  }
+  &:active {
+    color: #b8a38c;
+  }
+}
+
+:deep(.el-button--default) {
+  &:hover {
+    color: #dcc9b7;
+    border-color: #dcc9b7;
+  }
+  &:active {
+    color: #b8a38c;
+    border-color: #b8a38c;
+  }
+}
+
+:deep(.el-button.is-active) {
+  background-color: #dcc9b7;
+  border-color: #dcc9b7;
+  color: #303133;
+}
+
+:deep(.session-item.active) {
+  background-color: #dcc9b7 !important;
+  color: #303133 !important;
+  border-left: 3px solid #a9a6a2 !important;
+}
+
+:deep(.el-menu-item.is-active) {
+  background-color: #dcc9b7 !important;
+  color: #303133 !important;
+  border-left: 3px solid #a9a6a2 !important;
+}
+.user-bubble .message-content {
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 </style>

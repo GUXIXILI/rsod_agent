@@ -45,17 +45,34 @@ request.interceptors.response.use(
     // 返回响应数据，调用层无需再访问 .data
     return response.data
   },
-  (error) => {
+  async (error) => {
     // 网络错误（无 response 对象）
     if (!error.response) {
-      // 认证页面由页面层统一给出“账号或密码错误”等隐私友好的提示
+      // 认证页面由页面层统一给出"账号或密码错误"等隐私友好的提示
       if (!isAuthPage()) {
         ElMessage.error('网络连接异常，请检查后端服务是否启动')
       }
       return Promise.reject(error)
     }
 
-    const { status } = error.response
+    const { status, config } = error.response
+
+    // ── 401 静默重试：解决登录后 token 尚未注入的竞态条件 ──
+    // 场景：页面初始化时 fetchSessions 先于 token 写入 localStorage 发出请求
+    // 重试时请求拦截器会重新从 localStorage 读取 token，此时 token 通常已就绪
+    if (status === 401 && !config._retried && !isAuthPage()) {
+      config._retried = true
+      // 短暂延迟，等待 token 写入完成
+      await new Promise(resolve => setTimeout(resolve, 300))
+      try {
+        return await request(config)
+      } catch (retryError) {
+        // 重试仍失败，回落使用 retryError 继续走后续错误处理流程
+        error = retryError
+        // 重试失败后不再重复触发 ElMessage，直接 reject
+        return Promise.reject(error)
+      }
+    }
 
     switch (status) {
       case 401:

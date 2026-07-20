@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import concurrent.futures
 import json
 import re
 import time
@@ -15,20 +16,37 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import openai
 from fastapi import HTTPException
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.agent.detection_agent import detection_agent
-from app.entity.db_models import ChatSession, ChatMessage
+from app.agent.memory import ConversationMemory
+from app.entity.db_models import ChatSession, ChatMessage, DetectionScene, DetectionTask
 from app.config.settings import settings
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 重新检测关键词列表，用于识别用户"重新检测上次图片"类请求
+REDETECT_KEYWORDS = [
+    "重新检测", "再检测", "再检测一次", "重新测",
+    "再测一次", "再试一次", "重新检测一遍",
+]
+
+# 模块级持久事件循环，用于在同步上下文中执行异步 Agent 调用
+# 避免 asyncio.run() 每次调用后关闭事件循环导致 httpx 连接池失效
+# （OpenAI 异步客户端通过 httpx.AsyncClient 维护 HTTP 连接池，
+#  连接持有对事件循环的引用，关闭循环后旧连接无法清理）
+_agent_event_loop = asyncio.new_event_loop()
+
 
 class ChatService:
     """对话服务，集成 ReAct Agent 实现智能火灾烟雾检测对话"""
+
+    def __init__(self):
+        self.conversation_memory = ConversationMemory()
 
     # ── 工具名称到意图关键词的映射（用于 Stub 模式下的意图识别） ──
     _TOOL_INTENT_MAP = {
@@ -303,7 +321,7 @@ class ChatService:
         if settings.LLM_STUB_MODE:
             return self._run_agent_stub(content, history, files)
         else:
-            return self._run_agent_real(content, history)
+            return self._run_agent_real(content, history, files)
 
     def _run_agent_stub(self, content: str, history: list = None, files: list = None) -> tuple:
         """
@@ -397,36 +415,70 @@ class ChatService:
 
         return reply, tool_calls, tool_result, tokens_used, latency_ms
 
-    def _run_agent_real(self, content: str, history: list = None) -> tuple:
+    def _run_agent_real(self, content: str, history: list = None, files: list = None) -> tuple:
         """
         真实模式：复用 DetectionAgent 单例执行对话。
 
         DetectionAgent 已在 detection_agent.py 中根据 settings 完成 LLM 配置，
         这里直接调用其 chat() 方法，避免重复创建 LLM 和 AgentExecutor 实例。
+
+        如果用户上传了图片，会先在函数内调用检测工具获取完整结果，再把文字摘要
+        注入提示词交给 Agent，避免把 base64 标注图送入 LLM 上下文导致 token 超限。
         """
         start_time = time.time()
+        tool_calls = []
+        tool_result_str = ""
 
         try:
             if not detection_agent.available:
                 raise RuntimeError("DetectionAgent 不可用，请检查 LLM 配置")
 
+            # 若用户上传图片，先直接检测并把摘要注入提示词
+            if files and self._has_image_file(files):
+                first_image_url = self._extract_first_image_url(files)
+                if first_image_url:
+                    tool_name = "detect_single_image"
+                    tool_args = {"image_path": first_image_url, "conf": 0.4, "iou": 0.3}
+                    tool_calls.append({"tool": tool_name, "args": tool_args})
+
+                    try:
+                        from app.agent.tools.detection_tool import detect_single_image
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                            tool_result_str = executor.submit(
+                                detect_single_image.invoke, tool_args
+                            ).result()
+                    except Exception as e:
+                        logger.exception("真实模式图片预处理检测失败")
+                        tool_result_str = json.dumps({"error": f"检测失败：{str(e)}"}, ensure_ascii=False)
+
+                    display_text = self._extract_tool_result_summary(tool_name, tool_result_str)
+                    content = (
+                        f"{content}\n\n【系统提示】已对用户上传的图片完成火灾烟雾检测，"
+                        f"检测结果摘要如下（请不要再次调用检测工具）：\n{display_text}\n"
+                        f"请直接基于以上结果回复用户。"
+                    )
+
             # 调用 detection_agent.chat()（异步 → 同步）
-            result = asyncio.run(detection_agent.chat(content, history))
+            # 使用模块级持久事件循环，避免 asyncio.run() 每次关闭循环
+            # 导致 httpx 连接池中的旧连接引用已关闭的循环而报错
+            result = _agent_event_loop.run_until_complete(
+                detection_agent.chat(content, history)
+            )
 
             reply_content = result.get("output", "抱歉，无法处理您的请求。")
 
-            # 提取工具调用信息
-            tool_calls = []
-            tool_result_str = ""
+            # 提取工具调用信息（Agent 可能基于系统提示不再调用检测工具）
             intermediate_steps = result.get("intermediate_steps", [])
             for step in intermediate_steps:
                 action, observation = step
-                tool_calls.append({
-                    "tool": action.tool,
-                    "args": action.tool_input,
-                })
-                if isinstance(observation, str):
-                    tool_result_str += observation + "\n"
+                # 仅记录非检测类工具的调用，避免重复记录已预处理的图片检测
+                if action.tool != "detect_single_image":
+                    tool_calls.append({
+                        "tool": action.tool,
+                        "args": action.tool_input,
+                    })
+                    if isinstance(observation, str):
+                        tool_result_str += observation + "\n"
 
             latency_ms = int((time.time() - start_time) * 1000)
             tokens_used = max(1, (len(content) + len(reply_content) + len(tool_result_str)) // 2)
@@ -437,7 +489,7 @@ class ChatService:
             logger.exception("ReAct Agent 执行失败")
             reply = f"AI 服务暂时不可用，请稍后重试。（错误：{str(e)}）"
             latency_ms = int((time.time() - start_time) * 1000)
-            return reply, [], "", 0, latency_ms
+            return reply, tool_calls, tool_result_str.strip(), 0, latency_ms
 
     # ══════════════════════════════════════════════════════════════
     # Stub 模式辅助方法
@@ -554,6 +606,10 @@ class ChatService:
             page_val = next(v for v in page_match.groups() if v is not None)
             args["page"] = int(page_val)
 
+        # search_knowledge 工具：直接使用用户消息作为查询
+        if tool_name == "search_knowledge":
+            args["query"] = content.strip()
+
         return args
 
     def _invoke_tool_stub(self, tool_name: str, args: dict) -> str:
@@ -606,6 +662,7 @@ class ChatService:
         将工具调用结果格式化为自然语言回复。
 
         模拟 Agent 在获得工具结果后，生成用户友好的回复。
+        如果 tool_result 是 detect_single_image 返回的 JSON，则提取 summary 字段展示。
 
         Args:
             user_message: 用户原始消息
@@ -630,7 +687,34 @@ class ChatService:
 
         prefix = prefixes.get(tool_name, f"已为您执行{tool_description}，以下是结果：")
 
-        return f"{prefix}\n\n{tool_result}"
+        # 检测工具返回 JSON 时，优先展示 summary 文字，避免把 base64 输出到聊天正文
+        display_result = tool_result
+        if tool_name == "detect_single_image":
+            try:
+                parsed = json.loads(tool_result)
+                if isinstance(parsed, dict) and "summary" in parsed:
+                    display_result = parsed["summary"]
+            except json.JSONDecodeError:
+                pass
+
+        return f"{prefix}\n\n{display_result}"
+
+    @staticmethod
+    def _extract_tool_result_summary(tool_name: str, tool_result: str) -> str:
+        """
+        从工具结果中提取适合在聊天正文中展示的文字摘要。
+
+        对于 detect_single_image 返回的 JSON，提取 summary 字段，
+        避免将 base64 图片数据输出到聊天流中。
+        """
+        if tool_name == "detect_single_image":
+            try:
+                parsed = json.loads(tool_result)
+                if isinstance(parsed, dict) and "summary" in parsed:
+                    return parsed["summary"]
+            except json.JSONDecodeError:
+                pass
+        return tool_result
 
     @staticmethod
     def _build_stub_reply(content: str, history: list = None) -> str:
@@ -673,7 +757,7 @@ class ChatService:
         - event: token, data: {content: "xxx"}
         - event: tool_call, data: {tool: "xxx", args: {...}}
         - event: done, data: {tokens_used, latency_ms, message_id, tool_calls, tool_result}
-        - event: error, data: {message: "xxx"}
+        - event: error, data: {content: "xxx"}
         """
         from app.database.session import SessionLocal
 
@@ -704,11 +788,15 @@ class ChatService:
                         file_hints.append(f"用户上传了文件: {file_url}（{file_name}）")
                 agent_content = "\n".join(file_hints) + "\n" + data.content
 
-            # 存储用户消息
+            # 存储用户消息到数据库
+            # 注意：DB 中存储用户原始文本（data.content），不包含文件提示
+            # 文件提示仅用于当前轮次的 Agent 调用，不应进入历史记录
+            # 否则后续对话中 LLM 会从历史中读取文件 URL 并再次调用检测工具，
+            # 导致 base64 标注图进入上下文造成 token 溢出
             user_msg = ChatMessage(
                 session_id=session.id,
                 role="user",
-                content=agent_content,
+                content=data.content,
                 agent_used="user",
             )
             db.add(user_msg)
@@ -729,6 +817,15 @@ class ChatService:
             )
             history = [{"role": m.role, "content": m.content} for m in reversed(history_messages)]
 
+            # 加载 ConversationMemory 中的历史
+            memory_history = self.conversation_memory.load_history(
+                str(user_id), str(session.id)
+            )
+            # 合并记忆历史到上下文
+            if memory_history:
+                memory_history = [msg for msg in memory_history if msg["role"] in ("user", "assistant")]
+                history = memory_history + history
+
             # 发送 thinking 事件（保留 start 向后兼容）
             start_data = {'session_id': session.id, 'message_id': user_msg.id}
             yield f"event: thinking\ndata: {json.dumps(start_data, ensure_ascii=False)}\n\n"
@@ -741,7 +838,6 @@ class ChatService:
                 # 先发送"思考中"的提示（text_chunk 新事件名，保留 token 向后兼容）
                 thinking_content = '🔍 正在分析您的问题...'
                 yield f"event: text_chunk\ndata: {json.dumps({'content': thinking_content}, ensure_ascii=False)}\n\n"
-                yield f"event: token\ndata: {json.dumps({'content': thinking_content}, ensure_ascii=False)}\n\n"
 
                 # 意图识别
                 normalized = agent_content.strip()
@@ -769,25 +865,31 @@ class ChatService:
                             )
 
                             # 发送工具开始事件
-                            tool_start_data = {'tool': tool_name, 'args': tool_args}
+                            tool_start_data = {'tool': tool_name, 'input': tool_args}
                             yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
                             yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
 
                             try:
                                 tool_result = self._invoke_tool_stub(tool_name, tool_args)
+                                json.loads(tool_result)  # 校验返回是否为有效 JSON
+                            except json.JSONDecodeError:
+                                logger.warning("SSE Stub 图片检测工具返回非 JSON 结果: %s", tool_result)
+                                tool_result = json.dumps({"error": f"工具返回了非 JSON 结果：{tool_result}"}, ensure_ascii=False)
                             except Exception as e:
                                 logger.exception("SSE Stub 图片检测工具调用失败: %s", e)
-                                tool_result = f"工具调用失败：{str(e)}"
+                                tool_result = json.dumps({"error": f"检测失败：{str(e)}"}, ensure_ascii=False)
 
-                            # 发送工具结束事件
-                            tool_end_data = {'tool': tool_name, 'result': str(tool_result)[:500]}
+                            # 发送工具结束事件（含完整结果，供前端解析标注图）
+                            tool_end_data = {'tool': tool_name, 'result': tool_result}
                             yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
 
-                            # 发送工具结果事件
-                            nl = "\n\n"
-                            result_content = nl + tool_result
+                            # 发送专用工具结果事件，前端可据此渲染 DetectionResultCard
+                            yield f"event: tool_result\ndata: {json.dumps({'tool': tool_name, 'result': tool_result}, ensure_ascii=False)}\n\n"
+
+                            # 发送文字摘要到聊天正文
+                            display_text = self._extract_tool_result_summary(tool_name, tool_result)
+                            result_content = "\n\n" + display_text
                             yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
-                            yield f"event: token\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
 
                             full_content = self._format_agent_response(
                                 user_message=normalized,
@@ -806,7 +908,7 @@ class ChatService:
                         tool_calls = [{"tool": tool_name, "args": tool_args}]
 
                         # 发送工具开始事件（tool_start 新事件名，保留 tool_call 向后兼容）
-                        tool_start_data = {'tool': tool_name, 'args': tool_args}
+                        tool_start_data = {'tool': tool_name, 'input': tool_args}
                         yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
                         yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
 
@@ -814,17 +916,16 @@ class ChatService:
                             tool_result = self._invoke_tool_stub(tool_name, tool_args)
                         except Exception as e:
                             logger.exception("SSE Stub 工具调用失败: tool=%s", tool_name)
-                            tool_result = f"工具调用失败：{str(e)}"
+                            tool_result = json.dumps({"error": f"工具调用失败：{str(e)}"}, ensure_ascii=False)
 
                         # 发送工具结束事件（tool_end 新事件名）
                         tool_end_data = {'tool': tool_name, 'result': str(tool_result)[:500]}
                         yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
 
                         # 发送工具结果事件（text_chunk 新事件名，保留 token 向后兼容）
-                        nl = "\n\n"
-                        result_content = nl + tool_result
+                        display_text = self._extract_tool_result_summary(tool_name, tool_result)
+                        result_content = "\n\n" + display_text
                         yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
-                        yield f"event: token\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
 
                         full_content = self._format_agent_response(
                             user_message=normalized,
@@ -838,7 +939,6 @@ class ChatService:
                         for offset in range(0, len(full_content), 8):
                             chunk = full_content[offset : offset + 8]
                             yield f"event: text_chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
-                            yield f"event: token\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
             else:
                 # ── 真实模式：复用 DetectionAgent 单例流式输出 ──
                 try:
@@ -848,46 +948,221 @@ class ChatService:
                     full_content = ""
                     tool_calls = []
                     tool_result = ""
+                    skip_agent = False  # 图片预处理后跳过 Agent，避免 token 溢出
 
-                    async for event in detection_agent.chat_stream(agent_content, history):
-                        event_type = event.get("type", "")
+                    # 重新检测关键词检测：用户未上传新图片但请求重新检测上次图片
+                    # 从 DetectionTask 表查询最近一次有 original_url 的已完成检测任务
+                    if not data.files and any(kw in data.content for kw in REDETECT_KEYWORDS):
+                        try:
+                            recent_task = db.query(DetectionTask).filter(
+                                DetectionTask.user_id == user_id,
+                                DetectionTask.original_url.isnot(None),
+                                DetectionTask.original_url != "",
+                                DetectionTask.status == "completed",
+                            ).order_by(DetectionTask.created_at.desc()).first()
 
-                        if event_type == "text_chunk":
-                            token_text = event.get("content", "")
-                            full_content += token_text
-                            yield f"event: text_chunk\ndata: {json.dumps({'content': token_text}, ensure_ascii=False)}\n\n"
-                            yield f"event: token\ndata: {json.dumps({'content': token_text}, ensure_ascii=False)}\n\n"
+                            if recent_task and recent_task.original_url:
+                                original_url = recent_task.original_url
+                                # 若 original_url 包含逗号分隔的多张图片，取第一张
+                                if "," in original_url:
+                                    original_url = original_url.split(",")[0].strip()
+                                logger.info("检测到重新检测请求，使用最近任务 original_url=%s", original_url)
 
-                        elif event_type == "tool_call":
-                            tool_name = event.get("tool", "")
-                            tool_input = event.get("input", {})
-                            tool_calls.append({"tool": tool_name, "args": tool_input})
-                            tool_start_data = {'tool': tool_name, 'args': tool_input}
+                                tool_name = "detect_single_image"
+                                tool_args = {"image_path": original_url, "conf": 0.4, "iou": 0.3}
+                                tool_calls.append({"tool": tool_name, "args": tool_args})
+
+                                tool_start_data = {"tool": tool_name, "input": tool_args}
+                                yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+                                yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+
+                                try:
+                                    from app.agent.tools.detection_tool import detect_single_image
+                                    loop = asyncio.get_event_loop()
+                                    tool_result = await loop.run_in_executor(
+                                        None,
+                                        lambda: detect_single_image.invoke(tool_args),
+                                    )
+                                    json.loads(tool_result)
+                                except json.JSONDecodeError:
+                                    logger.warning("重新检测工具返回非 JSON 结果: %s", tool_result)
+                                    tool_result = json.dumps({"error": f"工具返回了非 JSON 结果：{tool_result}"}, ensure_ascii=False)
+                                except Exception as e:
+                                    logger.exception("重新检测图片预处理失败")
+                                    tool_result = json.dumps({"error": f"检测失败：{str(e)}"}, ensure_ascii=False)
+
+                                tool_end_data = {"tool": tool_name, "result": tool_result}
+                                yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+                                yield f"event: tool_result\ndata: {json.dumps({'tool': tool_name, 'result': tool_result}, ensure_ascii=False)}\n\n"
+
+                                display_text = self._extract_tool_result_summary(tool_name, tool_result)
+                                result_content = "\n\n" + display_text
+                                yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
+
+                                try:
+                                    detect_result = json.loads(tool_result)
+                                    summary = detect_result.get("summary", "检测完成")
+                                except (json.JSONDecodeError, TypeError):
+                                    summary = "检测完成，但无法解析详细结果。"
+                                full_content = f"已对上次上传的图片重新检测，结果如下：{summary}"
+                                for offset in range(0, len(full_content), 8):
+                                    chunk = full_content[offset:offset + 8]
+                                    yield f"event: text_chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+                                skip_agent = True
+                        except Exception as e:
+                            # 查 DB 失败不影响正常流程，让 LLM 自然回复
+                            logger.warning("重新检测查询 DetectionTask 失败: %s", e)
+
+                    # 若用户上传了图片，先直接调用检测工具，避免把 base64 标注图
+                    # 送入 LLM 上下文导致 token 超限；只把文字摘要交给 Agent。
+                    if data.files and self._has_image_file(data.files):
+                        first_image_url = self._extract_first_image_url(data.files)
+                        if first_image_url:
+                            tool_name = "detect_single_image"
+                            tool_args = {"image_path": first_image_url, "conf": 0.4, "iou": 0.3}
+                            tool_calls.append({"tool": tool_name, "args": tool_args})
+
+                            tool_start_data = {"tool": tool_name, "input": tool_args}
                             yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
                             yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
 
-                        elif event_type == "tool_result":
-                            tool_output = event.get("result", "")
-                            tool_name = event.get("tool", "")
-                            if tool_output:
-                                tool_result += str(tool_output) + "\n"
-                                tool_end_data = {'tool': tool_name, 'result': str(tool_output)[:500]}
-                                yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+                            try:
+                                from app.agent.tools.detection_tool import detect_single_image
+                                loop = asyncio.get_event_loop()
+                                tool_result = await loop.run_in_executor(
+                                    None,
+                                    lambda: detect_single_image.invoke(tool_args),
+                                )
+                                json.loads(tool_result)  # 校验返回是否为有效 JSON
+                            except json.JSONDecodeError:
+                                logger.warning("真实模式图片检测工具返回非 JSON 结果: %s", tool_result)
+                                tool_result = json.dumps({"error": f"工具返回了非 JSON 结果：{tool_result}"}, ensure_ascii=False)
+                            except Exception as e:
+                                logger.exception("真实模式图片预处理检测失败")
+                                tool_result = json.dumps({"error": f"检测失败：{str(e)}"}, ensure_ascii=False)
 
-                        elif event_type == "error":
-                            error_content = event.get("content", "")
-                            yield f"event: error\ndata: {json.dumps({'message': error_content}, ensure_ascii=False)}\n\n"
+                            # 发送完整工具结果，前端可解析标注图
+                            tool_end_data = {"tool": tool_name, "result": tool_result}
+                            yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+                            yield f"event: tool_result\ndata: {json.dumps({'tool': tool_name, 'result': tool_result}, ensure_ascii=False)}\n\n"
+
+                            # 在聊天正文显示文字摘要
+                            display_text = self._extract_tool_result_summary(tool_name, tool_result)
+                            result_content = "\n\n" + display_text
+                            yield f"event: text_chunk\ndata: {json.dumps({'content': result_content}, ensure_ascii=False)}\n\n"
+
+                            # 图片预处理后，检测结果已发送给前端。
+                            # 跳过 Agent 调用，避免 LLM 无视指令再次调用 detect_single_image，
+                            # 导致 base64 标注图进入上下文造成 token 溢出（682083 > 131072）
+                            try:
+                                detect_result = json.loads(tool_result)
+                                summary = detect_result.get("summary", "检测完成")
+                            except (json.JSONDecodeError, TypeError):
+                                summary = "检测完成，但无法解析详细结果。"
+                            full_content = f"根据检测结果：{summary}"
+                            # 流式输出回复
+                            for offset in range(0, len(full_content), 8):
+                                chunk = full_content[offset:offset + 8]
+                                yield f"event: text_chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+                            skip_agent = True
+
+                            # 保存 DetectionTask 记录（含 original_url），供后续"重新检测"查询使用
+                            # detect_single_image 工具内部使用 user_id=1 创建记录，
+                            # 此处以当前用户 ID 另存一条，确保重新检测时按 user_id 能匹配到
+                            try:
+                                detect_result = json.loads(tool_result)
+                                fire_scene = db.query(DetectionScene).filter(
+                                    DetectionScene.name == "fire_smoke",
+                                    DetectionScene.is_active == True,
+                                ).first()
+                                scene_id = fire_scene.id if fire_scene else 1
+
+                                file_name = None
+                                if data.files:
+                                    for f in data.files:
+                                        if isinstance(f, dict) and f.get("type") == "image":
+                                            file_name = f.get("name", "")
+                                            break
+
+                                task = DetectionTask(
+                                    user_id=user_id,
+                                    scene_id=scene_id,
+                                    task_type="single",
+                                    status="completed",
+                                    file_name=file_name,
+                                    original_url=first_image_url,
+                                    annotated_url=detect_result.get("annotated_image", ""),
+                                    total_images=1,
+                                    total_objects=detect_result.get("total_detections", 0),
+                                    total_inference_time=detect_result.get("inference_time", 0),
+                                    conf_threshold=0.4,
+                                    iou_threshold=0.3,
+                                    fire_object_count=detect_result.get("fire_count", 0),
+                                    smoke_object_count=detect_result.get("smoke_count", 0),
+                                    detected_at=datetime.now(timezone.utc),
+                                )
+                                db.add(task)
+                                db.flush()
+                                logger.info(
+                                    "已保存 DetectionTask 记录 task_id=%s original_url=%s user_id=%s",
+                                    task.id, first_image_url, user_id,
+                                )
+                            except Exception as e:
+                                logger.warning("保存 DetectionTask 记录失败（不影响主流程）: %s", e)
+
+                    # 若未跳过 Agent（非图片消息或图片预处理失败），正常调用 Agent 流式输出
+                    if not skip_agent:
+                        async for event in detection_agent.chat_stream(agent_content, history):
+                            event_type = event.get("type", "")
+
+                            if event_type == "text_chunk":
+                                token_text = event.get("content", "")
+                                full_content += token_text
+                                yield f"event: text_chunk\ndata: {json.dumps({'content': token_text}, ensure_ascii=False)}\n\n"
+
+                            elif event_type == "tool_call":
+                                tool_name = event.get("tool", "")
+                                tool_input = event.get("input", {})
+                                # BUG-001: 防御 tool_input 为 None 的情况
+                                if tool_input is None:
+                                    tool_input = {}
+                                tool_calls.append({"tool": tool_name, "args": tool_input})
+                                tool_start_data = {'tool': tool_name, 'input': tool_input}
+                                yield f"event: tool_start\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+                                yield f"event: tool_call\ndata: {json.dumps(tool_start_data, ensure_ascii=False)}\n\n"
+
+                            elif event_type == "tool_result":
+                                tool_output = event.get("result", "")
+                                tool_name = event.get("tool", "")
+                                if tool_output:
+                                    tool_result += str(tool_output) + "\n"
+                                    # 发送完整工具结果，前端可解析标注图
+                                    tool_end_data = {'tool': tool_name, 'result': tool_output}
+                                    yield f"event: tool_end\ndata: {json.dumps(tool_end_data, ensure_ascii=False)}\n\n"
+                                    yield f"event: tool_result\ndata: {json.dumps({'tool': tool_name, 'result': tool_output}, ensure_ascii=False)}\n\n"
+
+                            elif event_type == "error":
+                                error_content = event.get("content", "") or event.get("message", "")
+                                if not error_content:
+                                    error_content = "AI 服务暂时不可用，请稍后重试。"
+                                yield f"event: error\ndata: {json.dumps({'content': error_content}, ensure_ascii=False)}\n\n"
 
                     if not full_content:
                         full_content = "抱歉，无法处理您的请求。"
 
-                except Exception as e:
-                    logger.exception("SSE Agent 执行失败")
-                    full_content = f"AI 服务暂时不可用，请稍后重试。"
+                except openai.BadRequestError as e:
+                    logger.error("SSE Agent 执行失败(BadRequestError): %s", str(e), exc_info=True)
+                    full_content = "AI 服务暂时不可用，请稍后重试。"
                     tool_calls = []
                     tool_result = ""
-                    yield f"event: text_chunk\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
-                    yield f"event: token\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
+                    yield f"event: error\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
+
+                except Exception as e:
+                    logger.exception("SSE Agent 执行失败")
+                    full_content = f"AI 服务暂时不可用，请稍后重试。（错误：{str(e)}）"
+                    tool_calls = []
+                    tool_result = ""
+                    yield f"event: error\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
 
             latency_ms = int((time.time() - start_time) * 1000)
             tokens_used = max(1, (len(data.content) + len(full_content)) // 2)
@@ -913,6 +1188,17 @@ class ChatService:
             db.commit()
             db.refresh(assistant_msg)
 
+            # 保存到 ConversationMemory
+            try:
+                self.conversation_memory.save_message(
+                    str(user_id), str(session.id), "user", data.content
+                )
+                self.conversation_memory.save_message(
+                    str(user_id), str(session.id), "assistant", full_content
+                )
+            except Exception as e:
+                logger.warning("保存对话记忆失败（不影响主流程）: %s", e)
+
             # 发送 done 事件，包含 session_id 以便前端自动关联新会话
             done_data = {
                 "session_id": session.id,
@@ -927,7 +1213,247 @@ class ChatService:
         except Exception as e:
             db.rollback()
             logger.error("SSE流式输出错误: %s", e)
-            yield f"event: error\ndata: {json.dumps({'message': 'AI服务暂时不可用，请稍后重试'}, ensure_ascii=False)}\n\n"
+            yield f"event: error\ndata: {json.dumps({'content': 'AI服务暂时不可用，请稍后重试'}, ensure_ascii=False)}\n\n"
+        finally:
+            db.close()
+
+    async def send_message_stream_multi_agent(self, user_id: int, data, session_id: int = None):
+        """
+        SSE 流式发送消息（多Agent 编排模式），使用 LangGraph Supervisor 路由架构。
+
+        内部自行创建和管理 DB Session。
+        如果 LangGraph 初始化失败，自动降级到 send_message_stream 单Agent模式。
+
+        Yields SSE 事件:
+        - event: thinking, data: {session_id, message_id}
+        - event: agent_chain, data: {agents: ["supervisor","detection","summarize"], current: "detection"}
+        - event: text_chunk, data: {content: "xxx"}
+        - event: knowledge_sources, data: {sources: [...]}
+        - event: done, data: {tokens_used, latency_ms, message_id}
+        - event: error, data: {content: "xxx"}
+        """
+        from app.database.session import SessionLocal
+
+        db = SessionLocal()
+        try:
+            # 获取或创建会话
+            if session_id:
+                session = self._get_user_session(db, session_id, user_id)
+            else:
+                session = self.create_session(db, user_id)
+
+            # 构建消息内容
+            agent_content = data.content
+            if data.files:
+                file_hints = []
+                for f in data.files:
+                    file_type = f.get("type", "")
+                    file_url = f.get("url", "")
+                    file_name = f.get("name", "")
+                    if file_type == "image":
+                        file_hints.append(f"[附件图片路径: {file_url}]")
+                    elif file_type == "zip":
+                        file_hints.append(f"[附件ZIP路径: {file_url}]")
+                    elif file_type == "video":
+                        file_hints.append(f"[附件视频路径: {file_url}]")
+                    else:
+                        file_hints.append(f"[附件文件: {file_url}（{file_name}）]")
+                agent_content = "\n".join(file_hints) + "\n" + data.content
+
+            # 存储用户消息
+            user_msg = ChatMessage(
+                session_id=session.id,
+                role="user",
+                content=data.content,
+                agent_used="user",
+            )
+            db.add(user_msg)
+            db.commit()
+            db.refresh(user_msg)
+
+            # 加载历史上下文
+            history_messages = (
+                db.query(ChatMessage)
+                .filter(
+                    ChatMessage.session_id == session.id,
+                    ChatMessage.id != user_msg.id,
+                )
+                .order_by(ChatMessage.created_at.desc())
+                .limit(10)
+                .all()
+            )
+            history = [{"role": m.role, "content": m.content} for m in reversed(history_messages)]
+
+            # 加载 ConversationMemory 中的历史
+            memory_history = self.conversation_memory.load_history(
+                str(user_id), str(session.id)
+            )
+            if memory_history:
+                memory_history = [msg for msg in memory_history if msg["role"] in ("user", "assistant")]
+                history = memory_history + history
+
+            # 发送 thinking 事件
+            start_data = {'session_id': session.id, 'message_id': user_msg.id}
+            yield f"event: thinking\ndata: {json.dumps(start_data, ensure_ascii=False)}\n\n"
+
+            start_time = time.time()
+
+            try:
+                # 尝试构建 LangGraph 多Agent 工作流
+                from app.agent.graph import build_agent_graph
+                from app.agent.nodes import detection_node, analysis_node, qa_node
+                from langchain_core.messages import HumanMessage, SystemMessage
+
+                # 获取 LLM 实例
+                from app.agent.detection_agent import detection_agent
+                if not detection_agent.available:
+                    raise RuntimeError("DetectionAgent 不可用，降级到单Agent模式")
+
+                llm = detection_agent.llm
+                if not llm:
+                    raise RuntimeError("LLM 未初始化，降级到单Agent模式")
+
+                # 构建图
+                graph = build_agent_graph(llm, detection_node, analysis_node, qa_node)
+
+                # 准备初始状态
+                initial_state = {
+                    "messages": [HumanMessage(content=agent_content)],
+                    "user_id": user_id,
+                    "session_id": str(session.id),
+                }
+
+                # 发送 agent_chain 事件：开始 Supervisor 路由
+                chain_data = {
+                    "agents": ["supervisor", "detection", "analysis", "qa", "summarize"],
+                    "current": "supervisor",
+                    "status": "routing",
+                }
+                yield f"event: agent_chain\ndata: {json.dumps(chain_data, ensure_ascii=False)}\n\n"
+
+                full_content = ""
+                knowledge_sources = []
+
+                # 流式执行 LangGraph
+                async for event in graph.astream(initial_state):
+                    for node_name, node_output in event.items():
+                        # 发送 agent_chain 事件
+                        chain_data = {
+                            "agents": ["supervisor", "detection", "analysis", "qa", "summarize"],
+                            "current": node_name,
+                            "status": "running",
+                        }
+                        yield f"event: agent_chain\ndata: {json.dumps(chain_data, ensure_ascii=False)}\n\n"
+
+                        if node_name == "supervisor":
+                            next_agent = node_output.get("next_agent", "unknown")
+                            logger.info("Supervisor 路由到: %s", next_agent)
+
+                        elif node_name == "detection":
+                            detection_result = node_output.get("detection_result", {})
+                            if detection_result:
+                                result_text = json.dumps(detection_result, ensure_ascii=False)
+                                yield f"event: text_chunk\ndata: {json.dumps({'content': '检测完成...'}, ensure_ascii=False)}\n\n"
+
+                        elif node_name == "analysis":
+                            analysis_result = node_output.get("analysis_result", {})
+                            if analysis_result:
+                                result_text = json.dumps(analysis_result, ensure_ascii=False)
+                                yield f"event: text_chunk\ndata: {json.dumps({'content': '分析完成...'}, ensure_ascii=False)}\n\n"
+
+                        elif node_name == "qa":
+                            qa_result = node_output.get("qa_result", {})
+                            if qa_result and isinstance(qa_result, dict) and "error" not in qa_result:
+                                yield f"event: text_chunk\ndata: {json.dumps({'content': '知识检索完成...'}, ensure_ascii=False)}\n\n"
+
+                        elif node_name == "summarize":
+                            final_response = node_output.get("final_response", "")
+                            if final_response:
+                                full_content = final_response
+                                # 流式输出最终回复
+                                for offset in range(0, len(full_content), 8):
+                                    chunk = full_content[offset:offset + 8]
+                                    yield f"event: text_chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+
+                            knowledge_sources = node_output.get("knowledge_sources", [])
+                            if knowledge_sources:
+                                yield f"event: knowledge_sources\ndata: {json.dumps({'sources': knowledge_sources}, ensure_ascii=False)}\n\n"
+
+                if not full_content:
+                    full_content = "抱歉，无法处理您的请求。"
+
+            except Exception as graph_error:
+                logger.warning("LangGraph 多Agent 初始化失败，降级到单Agent模式: %s", graph_error)
+                yield f"event: text_chunk\ndata: {json.dumps({'content': '多Agent模式初始化失败，已降级到单Agent模式...'}, ensure_ascii=False)}\n\n"
+
+                # 降级：使用现有的 send_message_stream 逻辑
+                # 这里直接调用单Agent的 chat_stream
+                from app.agent.detection_agent import detection_agent
+
+                full_content = ""
+                try:
+                    async for event in detection_agent.chat_stream(agent_content, history):
+                        event_type = event.get("type", "")
+                        if event_type == "text_chunk":
+                            token_text = event.get("content", "")
+                            full_content += token_text
+                            yield f"event: text_chunk\ndata: {json.dumps({'content': token_text}, ensure_ascii=False)}\n\n"
+                        elif event_type == "error":
+                            error_content = event.get("content", "") or event.get("message", "")
+                            if not error_content:
+                                error_content = "AI 服务暂时不可用"
+                            yield f"event: error\ndata: {json.dumps({'content': error_content}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    logger.exception("降级单Agent 也失败")
+                    full_content = f"AI 服务暂时不可用，请稍后重试。（错误：{str(e)}）"
+                    yield f"event: error\ndata: {json.dumps({'content': full_content}, ensure_ascii=False)}\n\n"
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            tokens_used = max(1, (len(data.content) + len(full_content)) // 2)
+
+            # 存储 AI 回复
+            assistant_msg = ChatMessage(
+                session_id=session.id,
+                role="assistant",
+                content=full_content,
+                agent_used="multi_agent",
+                tokens_used=tokens_used if tokens_used > 0 else None,
+                latency_ms=latency_ms if latency_ms > 0 else None,
+            )
+            db.add(assistant_msg)
+
+            # 更新会话
+            session.message_count = (session.message_count or 0) + 2
+            session.last_message_at = datetime.now(timezone.utc)
+            if session.message_count == 2:
+                session.title = data.content[:50] if len(data.content) > 50 else data.content
+            db.commit()
+            db.refresh(assistant_msg)
+
+            # 保存到 ConversationMemory
+            try:
+                self.conversation_memory.save_message(
+                    str(user_id), str(session.id), "user", data.content
+                )
+                self.conversation_memory.save_message(
+                    str(user_id), str(session.id), "assistant", full_content
+                )
+            except Exception as e:
+                logger.warning("保存对话记忆失败（不影响主流程）: %s", e)
+
+            # 发送 done 事件
+            done_data = {
+                "session_id": session.id,
+                "tokens_used": tokens_used,
+                "latency_ms": latency_ms,
+                "message_id": assistant_msg.id,
+            }
+            yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            db.rollback()
+            logger.error("多Agent SSE 流式输出错误: %s", e)
+            yield f"event: error\ndata: {json.dumps({'content': 'AI服务暂时不可用，请稍后重试'}, ensure_ascii=False)}\n\n"
         finally:
             db.close()
 

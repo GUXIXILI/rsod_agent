@@ -5,6 +5,7 @@
 """
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 
 from app.config.settings import settings
@@ -24,7 +25,11 @@ def setup_logging() -> None:
        - 单文件最大 settings.LOG_MAX_BYTES（默认 10MB）
        - 保留 settings.LOG_BACKUP_COUNT（默认 5）份备份
 
-    3. 降低第三方库日志噪音：
+    3. stderr Handler（StreamHandler）：
+       - 输出 ERROR 及以上级别到 stderr
+       - 供 startup_backend_err.log 监控 ERR 日志
+
+    4. 降低第三方库日志噪音：
        - uvicorn / sqlalchemy / minio / httpx → WARNING 级别
     """
     # ── 确保日志目录存在 ──────────────────────────────
@@ -63,7 +68,13 @@ def setup_logging() -> None:
     file_handler.setFormatter(log_format)
     root_logger.addHandler(file_handler)
 
-    # ── 3. 降低第三方库日志噪音 ──────────────────────
+    # ── 3. stderr Handler（ERROR 级别日志输出到 stderr，供 startup_backend_err.log 监控）──
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.ERROR)  # 只输出 ERROR 及以上级别
+    stderr_handler.setFormatter(log_format)
+    root_logger.addHandler(stderr_handler)
+
+    # ── 4. 降低第三方库日志噪音 ──────────────────────
     for lib_name in ("uvicorn", "sqlalchemy", "minio", "httpx"):
         logging.getLogger(lib_name).setLevel(logging.WARNING)
 

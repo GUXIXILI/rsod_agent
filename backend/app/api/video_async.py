@@ -71,13 +71,17 @@ def get_video_task_status(
     data = {
         "task_id": task_id,
         "progress": progress_info.get("progress", 0),
+        # 优先使用 progress_info 中的 status（已从 DB 查询），
+        # 其次使用 detail 中的 status，最后回退为 "unknown"
+        "status": (
+            progress_info.get("status")
+            or (detail["task"].get("status") if detail and isinstance(detail.get("task"), dict) else None)
+            or "unknown"
+        ),
     }
 
     if detail:
-        data["status"] = detail["task"].get("status", "unknown") if isinstance(detail.get("task"), dict) else "unknown"
         data["detail"] = detail
-    else:
-        data["status"] = progress_info.get("status", "processing")
 
     return {
         "code": 200,

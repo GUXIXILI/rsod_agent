@@ -1,13 +1,10 @@
 <template>
-  <!-- 主布局：Header + Sidebar + 内容区 三栏结构 -->
+  <!-- 主布局：顶部 Header + 内容区 -->
   <div class="main-layout">
     <!-- 顶部导航栏 -->
     <AppHeader />
 
-    <!-- 左侧侧边栏 -->
-    <AppSidebar />
-
-    <!-- 右侧主内容区 -->
+    <!-- 主内容区 -->
     <main class="main-layout__content">
       <router-view />
     </main>
@@ -16,7 +13,6 @@
 
 <script setup>
 import AppHeader from './AppHeader.vue'
-import AppSidebar from './AppSidebar.vue'
 </script>
 
 <style lang="scss" scoped>
@@ -25,9 +21,9 @@ import AppSidebar from './AppSidebar.vue'
   width: 100%;
   min-height: 100vh;
 
-  /* 右侧主内容区 —— 避开 Header 和 Sidebar 的固定区域 */
+  /* 主内容区 —— 仅避开顶部 Header */
   &__content {
-    margin-left: $sidebar-width;
+    margin-left: 0;
     margin-top: $header-height;
     min-height: calc(100vh - $header-height);
     padding: 20px;

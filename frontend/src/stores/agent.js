@@ -28,8 +28,16 @@ export const useAgentStore = defineStore('agent', {
      * 从后端加载会话列表（分页）
      * GET /api/chat/sessions → { code, message, data: { items, total, skip, limit } }
      * 响应拦截器已解包 response.data，所以 res 直接是 { code, message, data }
+     *
+     * 内置 token 就绪检查：若 token 尚未写入 localStorage 则等待后重试，
+     * 解决登录后页面初始化时的竞态条件（BUG-007）
      */
     async fetchSessions() {
+      // 等待 token 就绪（最多等待 15 次，每次 100ms，共 1500ms）
+      for (let i = 0; i < 15; i++) {
+        if (localStorage.getItem('rsod_token')) break
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
       try {
         const res = await request.get('/chat/sessions')
         this.sessions = res.data?.items || []

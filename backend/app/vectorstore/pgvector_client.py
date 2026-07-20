@@ -86,14 +86,26 @@ class PgvectorClient:
             """
             db.execute(text(create_table_sql))
 
-            # 创建索引以加速检索（IVFFlat 索引，适合近似最近邻搜索）
-            create_index_sql = f"""
-                CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_embedding
-                ON {self.TABLE_NAME}
-                USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = 100)
-            """
-            db.execute(text(create_index_sql))
+            # 删除旧索引（如果存在），避免向量多样性不足时索引失效
+            drop_index_sql = f"DROP INDEX IF EXISTS idx_{self.TABLE_NAME}_embedding"
+            db.execute(text(drop_index_sql))
+
+            # 仅在数据量足够大时创建 IVFFlat 索引（小数据集顺序扫描更快且召回率 100%）
+            # IVFFlat 要求 lists 数量远小于数据行数，数据量 < 1000 时使用顺序扫描
+            row_count = db.execute(text(f"SELECT COUNT(*) FROM {self.TABLE_NAME}")).scalar()
+            if row_count >= 1000:
+                lists = min(100, max(1, row_count // 100))
+                create_index_sql = f"""
+                    CREATE INDEX idx_{self.TABLE_NAME}_embedding
+                    ON {self.TABLE_NAME}
+                    USING ivfflat (embedding vector_cosine_ops)
+                    WITH (lists = {lists})
+                """
+                db.execute(text(create_index_sql))
+                db.execute(text("SET ivfflat.probes = 20"))
+                logger.info(f"创建 IVFFlat 索引，lists={lists}")
+            else:
+                logger.info(f"数据量 {row_count} < 1000，跳过 IVFFlat 索引创建，使用顺序扫描")
 
             db.commit()
             logger.info(f"向量表 {self.TABLE_NAME} 初始化完成")
@@ -189,6 +201,13 @@ class PgvectorClient:
         results = []
         try:
             vector_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+
+            # 检查是否存在 IVFFlat 索引，如果存在则设置探测列表数
+            index_exists = db.execute(text(
+                f"SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'idx_{self.TABLE_NAME}_embedding')"
+            )).scalar()
+            if index_exists:
+                db.execute(text("SET ivfflat.probes = 20"))
 
             # 使用 <=> 操作符计算余弦距离，1 - 距离 = 相似度
             search_sql = f"""

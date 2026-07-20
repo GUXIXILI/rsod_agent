@@ -181,6 +181,13 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
             pass
         return ""
 
+    @staticmethod
+    def _sanitize(value):
+        """过滤字符串中的 NUL (0x00) 字符，防止 PostgreSQL 写入失败"""
+        if isinstance(value, str):
+            return value.replace("\x00", "")
+        return value
+
     def _save_log(self, **kwargs):
         """写入 operation_logs 表"""
         try:
@@ -191,18 +198,18 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
             try:
                 log = OperationLog(
                     user_id=kwargs.get("user_id"),
-                    username=kwargs.get("username"),
-                    module=kwargs.get("module", "system"),
-                    action=kwargs.get("action", "unknown"),
-                    target_type=kwargs.get("target_type"),
-                    target_id=kwargs.get("target_id"),
-                    description=kwargs.get("description"),
-                    ip_address=kwargs.get("ip_address"),
-                    user_agent=kwargs.get("user_agent"),
-                    request_method=kwargs.get("request_method"),
-                    request_path=kwargs.get("request_path"),
-                    request_body=kwargs.get("body_summary"),
-                    status=kwargs.get("status", "success"),
+                    username=self._sanitize(kwargs.get("username")),
+                    module=self._sanitize(kwargs.get("module", "system")),
+                    action=self._sanitize(kwargs.get("action", "unknown")),
+                    target_type=self._sanitize(kwargs.get("target_type")),
+                    target_id=self._sanitize(kwargs.get("target_id")),
+                    description=self._sanitize(kwargs.get("description")),
+                    ip_address=self._sanitize(kwargs.get("ip_address")),
+                    user_agent=self._sanitize(kwargs.get("user_agent")),
+                    request_method=self._sanitize(kwargs.get("request_method")),
+                    request_path=self._sanitize(kwargs.get("request_path")),
+                    request_body=self._sanitize(kwargs.get("body_summary")),
+                    status=self._sanitize(kwargs.get("status", "success")),
                 )
                 db.add(log)
                 db.commit()

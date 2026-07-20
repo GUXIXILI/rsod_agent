@@ -6,6 +6,9 @@
  *   - thinking    — Agent 正在思考
  *   - tool_start  — 开始调用工具
  *   - tool_end    — 工具调用完成
+ *   - tool_result — 工具调用结果
+ *   - agent_chain — 多Agent调用链
+ *   - knowledge_sources — 知识来源
  *   - text_chunk  — 流式文本片段
  *   - done        — 完成（带完整响应）
  *   - error       — 错误信息
@@ -166,6 +169,12 @@ function processSSEMessage(message, onMessage) {
     if (!eventData.type && eventType) {
       eventData.type = eventType;
     }
+
+    // error 事件兼容旧版 message 字段，并确保 content 不为 undefined
+    if (eventData.type === "error") {
+      eventData.content = eventData.content ?? eventData.message ?? "";
+    }
+
     onMessage?.(eventData);
 
     // 遇到 done 事件，停止流

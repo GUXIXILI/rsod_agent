@@ -6,6 +6,7 @@
 - 批量检测：多张图片循环检测
 - 视频检测：逐帧检测，支持跳帧
 """
+import base64
 import io
 import json
 import os
@@ -18,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image
 from sqlalchemy.orm import Session
 
@@ -35,6 +37,13 @@ class DetectionService:
 
     MAX_CACHE_SIZE = 4
 
+    # ══════════════════════════════════════════════════════════════
+    # 过度识别兜底常量（避免单图检测出 300+ 目标导致标注图过大）
+    # ══════════════════════════════════════════════════════════════
+    MAX_DETECTIONS_PER_IMAGE = 50     # 单图最多保留的检测框数量
+    MIN_CONFIDENCE = 0.15             # 最终置信度兜底（低于此值直接丢弃）
+    MIN_BOX_AREA_RATIO = 0.0001       # 框面积占图像比例下限（过滤噪声框）
+
     def __init__(self):
         self._model_cache: OrderedDict[int, Any] = OrderedDict()
         self._lock = threading.Lock()
@@ -51,29 +60,131 @@ class DetectionService:
         image_size: int = 640,
     ) -> DetectionTask:
         """单图检测完整流程"""
+        # 0. 校验 scene_id 是否存在（避免外键约束违反导致 500 错误）
+        scene = db.query(DetectionScene).filter(DetectionScene.id == scene_id).first()
+        if not scene:
+            raise ValueError(f"场景不存在 (scene_id={scene_id})")
         minio_client = MinIOClient()
         ext = filename.rsplit(".", 1)[-1] if "." in filename else "jpg"
         object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/{filename}"
         original_url = None
+        # 1. 上传原图到 MinIO（非致命：上传失败不影响检测）
         try:
-            # 1. 上传原图到 MinIO
             original_url = minio_client.upload_bytes(image_file, object_name, f"image/{ext}")
+        except Exception as upload_err:
+            logger.warning("MinIO 原图上传失败，跳过存储继续检测: %s", upload_err)
+            # 兜底：保存到本地 static/originals/ 目录
+            try:
+                _BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+                local_originals_dir = _BACKEND_ROOT / "static" / "originals"
+                local_originals_dir.mkdir(parents=True, exist_ok=True)
+                local_path = local_originals_dir / filename
+                local_path.write_bytes(image_file)
+                original_url = f"/static/originals/{filename}"
+                logger.info("原图已保存到本地兜底路径: %s", original_url)
+            except Exception as local_err:
+                logger.warning("本地原图兜底保存也失败: %s", local_err)
 
+        try:
             # 2. 加载场景默认模型
             model = self._load_model(db, scene_id)
 
-            # 3. 执行推理
-            image = Image.open(io.BytesIO(image_file))
-            image_np = np.array(image)
-            results = model(image_np, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
+            # 3. 执行推理（强制转为 RGB 避免 RGBA 四通道导致模型报错）
+            # 注意：必须传 PIL Image 而非 numpy 数组，因为 YOLO 对 PIL Image 和 numpy
+            # 数组的预处理路径不同，numpy 数组会导致检测结果全部为 0（P0 级 bug）
+            image = Image.open(io.BytesIO(image_file)).convert("RGB")
+            t_start = datetime.now()
+            results = model(image, conf=conf_threshold, iou=iou_threshold, imgsz=image_size, verbose=False)
+            # 记录推理耗时（优先使用 YOLO speed 指标，兜底用 wall-clock 时间）
+            inference_time = (
+                results[0].speed.get("inference", 0) if hasattr(results[0], "speed") and results[0].speed
+                else (datetime.now() - t_start).total_seconds() * 1000
+            )
 
-            # 4. 绘制检测框并上传标注图
-            annotated_image = results[0].plot()
+            # 4. 收集并过滤检测框（避免过度识别导致 300+ 目标）
+            image_area = image.width * image.height
+            raw_boxes = list(results[0].boxes)
+
+            # 按置信度从高到低排序
+            raw_boxes.sort(key=lambda b: float(b.conf[0]), reverse=True)
+
+            # 数量上限过滤：只保留置信度最高的前 N 个框
+            if len(raw_boxes) > self.MAX_DETECTIONS_PER_IMAGE:
+                logger.warning(
+                    "检测到 %d 个目标，超过上限 %d，只保留置信度最高的 %d 个",
+                    len(raw_boxes), self.MAX_DETECTIONS_PER_IMAGE, self.MAX_DETECTIONS_PER_IMAGE,
+                )
+                raw_boxes = raw_boxes[:self.MAX_DETECTIONS_PER_IMAGE]
+
+            # 逐框过滤：丢弃极低置信度和过小的噪声框
+            valid_boxes = []
+            filtered_low_conf = 0
+            filtered_tiny = 0
+            for box in raw_boxes:
+                conf = float(box.conf[0])
+                xyxy = box.xyxy[0].tolist()
+                x1, y1, x2, y2 = xyxy
+                w = x2 - x1
+                h = y2 - y1
+                area = w * h
+                area_ratio = area / image_area if image_area > 0 else 0
+
+                if conf < self.MIN_CONFIDENCE:
+                    filtered_low_conf += 1
+                    continue
+                if area_ratio < self.MIN_BOX_AREA_RATIO:
+                    filtered_tiny += 1
+                    continue
+
+                valid_boxes.append((box, conf, xyxy, x1, y1, x2, y2, w, h, area))
+
+            if filtered_low_conf > 0 or filtered_tiny > 0:
+                logger.warning(
+                    "过滤了 %d 个低置信度框（<%.2f）和 %d 个过小框（<%.4f%%），保留 %d 个有效框",
+                    filtered_low_conf, self.MIN_CONFIDENCE,
+                    filtered_tiny, self.MIN_BOX_AREA_RATIO * 100,
+                    len(valid_boxes),
+                )
+
+            # 4.5 绘制标注图（只绘制过滤后保留的有效框）
+            annotated_image = results[0].plot()  # 原始所有框
+            if filtered_low_conf > 0 or filtered_tiny > 0 or len(raw_boxes) < len(results[0].boxes):
+                # 有过滤时，在原始图上手动重新绘制，只画有效框
+                annotated_image = cv2.cvtColor(
+                    np.array(Image.open(io.BytesIO(image_file)).convert("RGB")), cv2.COLOR_RGB2BGR
+                )
+                for box_data in valid_boxes:
+                    _, conf, _, x1, y1, x2, y2, _, _, _ = box_data
+                    cls_id = int(box_data[0].cls[0])
+                    cls_name = model.names[cls_id]
+                    color = (0, 0, 255) if cls_name == "fire" else (0, 255, 255)  # 红/黄
+                    cv2.rectangle(annotated_image, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                    label = f"{cls_name} {conf:.2f}"
+                    cv2.putText(annotated_image, label, (int(x1), int(y1) - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             annotated_bytes = cv2.imencode(f".{ext}", annotated_image)[1].tobytes()
             annotated_object_name = f"detection/{user_id}/{datetime.now().strftime('%Y%m%d')}/annotated_{filename}"
-            annotated_url = minio_client.upload_bytes(annotated_bytes, annotated_object_name, f"image/{ext}")
+            annotated_url = None
+            try:
+                annotated_url = minio_client.upload_bytes(annotated_bytes, annotated_object_name, f"image/{ext}")
+            except Exception as upload_err:
+                logger.warning("MinIO 标注图上传失败，跳过存储: %s", upload_err)
+                # 兜底：保存到本地 static/annotated/ 目录
+                try:
+                    _BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+                    local_annotated_dir = _BACKEND_ROOT / "static" / "annotated"
+                    local_annotated_dir.mkdir(parents=True, exist_ok=True)
+                    annotated_filename = f"annotated_{filename}"
+                    local_annotated_path = local_annotated_dir / annotated_filename
+                    local_annotated_path.write_bytes(annotated_bytes)
+                    annotated_url = f"/static/annotated/{annotated_filename}"
+                    logger.info("标注图已保存到本地兜底路径: %s", annotated_url)
+                except Exception as local_err:
+                    logger.warning("本地标注图兜底保存也失败: %s", local_err)
 
             # 5. 创建 DetectionTask 记录
+            # 同时把标注图以 base64 形式附在对象上，供上层（如对话工具）在 MinIO
+            # 上传失败时直接嵌入到回复中，避免丢失可视化结果。
             task = DetectionTask(
                 user_id=user_id,
                 scene_id=scene_id,
@@ -85,26 +196,24 @@ class DetectionService:
                 image_width=image.width,
                 image_height=image.height,
                 detected_at=datetime.now(),
+                total_inference_time=inference_time,
             )
+            task.annotated_image_base64 = base64.b64encode(annotated_bytes).decode("utf-8")
             db.add(task)
             db.flush()
 
-            # 6. 为每个检测目标创建 DetectionResult
+            # 6. 为每个过滤后的有效检测目标创建 DetectionResult
             fire_count = 0
             smoke_count = 0
             fire_area_sum = 0.0
             smoke_area_sum = 0.0
-            image_area = image.width * image.height
+            fire_conf_sum = 0.0
+            smoke_conf_sum = 0.0
 
-            for box in results[0].boxes:
+            for box_data in valid_boxes:
+                box, conf, xyxy, x1, y1, x2, y2, w, h, area = box_data
                 cls_id = int(box.cls[0])
                 cls_name = model.names[cls_id]
-                xyxy = box.xyxy[0].tolist()
-                conf = float(box.conf[0])
-                x1, y1, x2, y2 = xyxy
-                w = x2 - x1
-                h = y2 - y1
-                area = w * h
 
                 result = DetectionResult(
                     task_id=task.id,
@@ -129,17 +238,23 @@ class DetectionService:
                 if cls_name == "fire":
                     fire_count += 1
                     fire_area_sum += area
+                    fire_conf_sum += conf
                 elif cls_name == "smoke":
                     smoke_count += 1
                     smoke_area_sum += area
+                    smoke_conf_sum += conf
 
-            # 7. 火情等级判定
+            # 7. 火情等级判定（传入平均置信度，避免低置信度误报触发预警）
             from app.services.fire_level_service import fire_level_service
+            avg_fire_conf = fire_conf_sum / fire_count if fire_count > 0 else 0.0
+            avg_smoke_conf = smoke_conf_sum / smoke_count if smoke_count > 0 else 0.0
             fire_level_result = fire_level_service.judge(
                 fire_count=fire_count,
                 smoke_count=smoke_count,
                 fire_area=fire_area_sum / image_area if image_area > 0 else 0,
                 smoke_area=smoke_area_sum / image_area if image_area > 0 else 0,
+                avg_fire_confidence=avg_fire_conf,
+                avg_smoke_confidence=avg_smoke_conf,
             )
 
             # 8. 更新 task 火情字段
@@ -207,6 +322,10 @@ class DetectionService:
         **kwargs,
     ) -> List[DetectionTask]:
         """批量检测：使用线程池并发处理多张图片"""
+        # 0. 校验 scene_id 是否存在（避免外键约束违反导致 500 错误）
+        scene = db.query(DetectionScene).filter(DetectionScene.id == scene_id).first()
+        if not scene:
+            raise ValueError(f"场景不存在 (scene_id={scene_id})")
         tasks: List[DetectionTask] = []
 
         def _detect_one(img_bytes: bytes, fname: str) -> Optional[DetectionTask]:
@@ -332,7 +451,7 @@ class DetectionService:
                         out.write(frame)
                         continue
 
-                    results = model(frame, conf=conf_threshold, iou=iou_threshold, imgsz=image_size)
+                    results = model(frame, conf=conf_threshold, iou=iou_threshold, imgsz=image_size, verbose=False)
                     annotated_frame = results[0].plot()
                     out.write(annotated_frame)
 
@@ -454,6 +573,10 @@ class DetectionService:
         Returns:
             检测任务列表
         """
+        # 0. 校验 scene_id 是否存在（避免外键约束违反导致 500 错误）
+        scene = db.query(DetectionScene).filter(DetectionScene.id == scene_id).first()
+        if not scene:
+            raise ValueError(f"场景不存在 (scene_id={scene_id})")
         import zipfile
 
         # ZIP 文件大小检查
@@ -587,24 +710,38 @@ class DetectionService:
                 "bbox": box.xyxy[0].tolist(),
             })
 
-        # 统计 fire 和 smoke 数量
-        fire_count = sum(1 for d in detections if d.get("class", "") == "fire")
-        smoke_count = sum(1 for d in detections if d.get("class", "") == "smoke")
+        # 统计 fire 和 smoke 数量、面积
+        image_area = frame.shape[1] * frame.shape[0]
+        fire_count = 0
+        smoke_count = 0
+        fire_area_sum = 0.0
+        smoke_area_sum = 0.0
+        for d in detections:
+            cls_name = d.get("class", "")
+            x1, y1, x2, y2 = d.get("bbox", [0, 0, 0, 0])
+            area = max(0.0, (x2 - x1) * (y2 - y1))
+            if cls_name == "fire":
+                fire_count += 1
+                fire_area_sum += area
+            elif cls_name == "smoke":
+                smoke_count += 1
+                smoke_area_sum += area
 
-        # 火情等级判定
-        fire_level = ""
-        if fire_count >= 3:
-            fire_level = "danger"
-        elif fire_count >= 2:
-            fire_level = "warning"
-        elif fire_count >= 1:
-            fire_level = "notice"
+        # 火情等级判定：与 fire_level_service 保持一致，烟雾场景也能触发 notice
+        from app.services.fire_level_service import fire_level_service
+
+        fire_level_result = fire_level_service.judge(
+            fire_count=fire_count,
+            smoke_count=smoke_count,
+            fire_area=fire_area_sum / image_area if image_area > 0 else 0.0,
+            smoke_area=smoke_area_sum / image_area if image_area > 0 else 0.0,
+        )
 
         return {
             "annotated_frame": annotated_b64,
             "detections": detections,
             "total_objects": len(detections),
-            "fire_level": fire_level,
+            "fire_level": fire_level_result["fire_level"],
             "fire_count": fire_count,
             "smoke_count": smoke_count,
         }
@@ -641,6 +778,9 @@ class DetectionService:
             )
 
         with self._lock:
+            # 确保模型使用确定性推理，避免 CPU 浮点非确定性导致结果随机波动
+            torch.use_deterministic_algorithms(True, warn_only=True)
+
             # 加锁后再次检查，避免并发重复加载
             if scene_id in self._model_cache:
                 self._model_cache.move_to_end(scene_id)

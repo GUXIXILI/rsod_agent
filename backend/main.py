@@ -19,6 +19,10 @@ from app.core.exceptions import register_exception_handlers
 from app.middleware.request_logger import RequestLogMiddleware
 from app.middleware.audit_log import AuditLogMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
+from app.llm_adapter import (
+    find_working_chat_config,
+    find_working_embedding_config,
+)
 
 # ── 初始化日志系统 ────────────────────────────────────
 # 必须在创建 app 之前调用，确保后续所有模块的 logger 都已配置好
@@ -52,6 +56,73 @@ def init_minio():
             print(f"MinIO 初始化失败（已跳过，不影响启动）: {result['error']}")
         else:
             print("MinIO 初始化超时（已跳过，不影响启动）")
+
+
+def init_llm_config():
+    """
+    启动时校验 LLM 与 Embedding 配置。
+
+    当 LLM_STUB_MODE=false 时，自动探测对话 API 与 Embedding API 是否可用。
+    若不可用，输出明确原因并降级到占位模式，避免服务因 LLM 鉴权失败而无法响应。
+    """
+    if settings.LLM_STUB_MODE:
+        print("LLM 占位模式已启用，跳过 API 校验")
+        return
+
+    print("正在校验 LLM API 配置...")
+
+    # 校验对话 API
+    chat_key = settings.QWEN_API_KEY or settings.OPENAI_API_KEY
+    chat_url = settings.QWEN_BASE_URL
+    chat_model = settings.QWEN_MODEL
+    chat_ok = False
+    if chat_url and chat_key:
+        result = find_working_chat_config(
+            chat_url,
+            chat_key,
+            preferred_models=[chat_model] if chat_model else [],
+        )
+        if result["success"]:
+            chat_ok = True
+            if result["model"] != chat_model:
+                print(
+                    f"[WARN] 配置的对话模型 '{chat_model}' 不可用，"
+                    f"已自动探测到可用模型 '{result['model']}'"
+                )
+        else:
+            print(f"[WARN] 对话 API 校验失败: {result['error']}")
+    else:
+        print("[WARN] 未配置对话 API Key 或 Base URL")
+
+    # 校验 Embedding API（允许复用对话 key）
+    emb_key = settings.EMBEDDING_API_KEY or chat_key
+    emb_url = settings.EMBEDDING_BASE_URL or chat_url
+    emb_model = settings.EMBEDDING_MODEL
+    emb_ok = False
+    if emb_url and emb_key:
+        result = find_working_embedding_config(
+            emb_url,
+            emb_key,
+            preferred_models=[emb_model] if emb_model else [],
+        )
+        if result["success"]:
+            emb_ok = True
+            if result["model"] != emb_model:
+                print(
+                    f"[WARN] 配置的 Embedding 模型 '{emb_model}' 不可用，"
+                    f"已自动探测到可用模型 '{result['model']}'"
+                )
+        else:
+            print(f"[WARN] Embedding API 校验失败: {result['error']}")
+    else:
+        print("[WARN] 未配置 Embedding API Key 或 Base URL")
+
+    # 任一关键配置不可用时降级到占位模式
+    if not chat_ok:
+        print("[WARN] 对话 LLM 不可用，自动降级到 LLM_STUB_MODE=true")
+        settings.LLM_STUB_MODE = True
+    elif not emb_ok:
+        print("[WARN] Embedding API 不可用，RAG 功能将降级，对话仍使用真实 LLM")
 
 
 def init_knowledge_index():
@@ -97,19 +168,27 @@ async def lifespan(_app: FastAPI):
     if not settings.DEBUG and (not settings.JWT_SECRET_KEY or len(settings.JWT_SECRET_KEY) < 32):
         raise RuntimeError("生产环境 JWT_SECRET_KEY 未配置或长度不足32位，拒绝启动")
     # 启动时执行
-    print("正在初始化服务...")
-    init_minio()
-    init_knowledge_index()
-    # 启动定时任务调度器
-    from app.scheduler import start_scheduler, stop_scheduler
+    # 测试环境（TESTING=true）跳过外部依赖初始化（LLM 校验 / MinIO / 知识库索引 / 调度器），
+    # 使单元测试快速且不依赖外部服务。
+    testing = os.getenv("TESTING", "").lower() in ("1", "true", "yes")
+    if not testing:
+        print("正在初始化服务...")
+        init_llm_config()
+        init_minio()
+        init_knowledge_index()
+        # 启动定时任务调度器
+        from app.scheduler import start_scheduler, stop_scheduler
 
-    start_scheduler()
+        start_scheduler()
+    else:
+        print("测试模式（TESTING=true）：跳过外部依赖初始化")
     try:
         yield
     finally:
         # 关闭时执行
         # 停止定时任务调度器
-        stop_scheduler()
+        if not testing:
+            stop_scheduler()
         print("服务已关闭")
 
 
@@ -177,6 +256,12 @@ app.include_router(admin_router)
 # ── 托管前端静态文件（SPA 模式）────────────────────────
 import os
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+
+# ── 挂载本地 static/ 目录（MinIO 兜底方案的标注图/原图）──
+BACKEND_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.isdir(BACKEND_STATIC_DIR):
+    os.makedirs(BACKEND_STATIC_DIR, exist_ok=True)
+app.mount("/static", StaticFiles(directory=BACKEND_STATIC_DIR), name="static")
 
 if os.path.isdir(FRONTEND_DIST):
     # 挂载 /assets/ 目录（JS/CSS 等静态资源）

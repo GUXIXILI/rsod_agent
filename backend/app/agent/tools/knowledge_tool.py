@@ -9,7 +9,7 @@
 RAG 不可用时自动降级到 MOCK 知识库。
 """
 
-import asyncio
+import json
 
 from langchain_core.tools import tool
 
@@ -184,7 +184,7 @@ knowledge_retriever = KnowledgeRetriever()
 # ══════════════════════════════════════════════════════════════
 
 @tool
-async def search_knowledge(query: str) -> str:
+def search_knowledge(query: str) -> str:
     """检索火灾烟雾检测相关的专业知识。
 
     适用场景：用户询问火灾检测原理、模型特性、最佳实践等专业知识。
@@ -196,24 +196,26 @@ async def search_knowledge(query: str) -> str:
         str: 检索到的知识内容，格式化的问答对。
     """
     try:
-        # 在独立线程中执行同步的 knowledge_retriever.search()，
-        # 避免阻塞事件循环（RAG 检索涉及数据库查询）
-        results = await asyncio.to_thread(
-            knowledge_retriever.search, query, top_k=3
-        )
+        results = knowledge_retriever.search(query, top_k=3)
 
         if not results:
-            return (
-                f"未找到与「{query}」相关的知识内容。"
-                "当前知识库中暂无相关信息，建议联系管理员更新知识库。"
-            )
+            return json.dumps({
+                "tool": "search_knowledge",
+                "status": "error",
+                "summary": f"未找到与「{query}」相关的知识内容。当前知识库中暂无相关信息，建议联系管理员更新知识库。"
+            }, ensure_ascii=False)
 
-        lines = [f"【知识检索结果】查询：「{query}」\n"]
-        for i, item in enumerate(results, 1):
-            lines.append(f"{i}. 问：{item['question']}")
-            lines.append(f"   答：{item['answer']}\n")
-
-        return "\n".join(lines)
+        return json.dumps({
+            "tool": "search_knowledge",
+            "status": "success",
+            "query": query,
+            "results": results,
+            "summary": f"找到 {len(results)} 条相关知识"
+        }, ensure_ascii=False)
     except Exception as e:
         logger.exception("知识检索工具调用失败: query=%s", query)
-        return f"知识检索失败：{str(e)}"
+        return json.dumps({
+            "tool": "search_knowledge",
+            "status": "error",
+            "summary": f"知识检索失败：{str(e)}"
+        }, ensure_ascii=False)

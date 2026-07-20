@@ -74,7 +74,8 @@ async def build_knowledge_index(current_user=Depends(get_current_user)):
 
 @router.get("/search", response_model=SearchResponse)
 async def search_knowledge(
-    q: str = Query(..., description="查询文本（自然语言问题）"),
+    q: str = Query(default=None, description="查询文本（自然语言问题）"),
+    query: str = Query(default=None, alias="query", description="查询文本（别名）"),
     top_k: int = Query(default=5, ge=1, le=20, description="返回结果数量，1-20"),
     current_user=Depends(get_current_user),
 ):
@@ -85,15 +86,19 @@ async def search_knowledge(
 
     Args:
         q: 查询文本，支持自然语言问题
+        query: 查询文本（别名，兼容前端 query 参数名）
         top_k: 返回结果数量，默认 5，范围 1-20
     """
-    logger.info(f"收到知识库检索请求: query='{q[:50]}...', top_k={top_k}")
+    # 取两者中非空的值，兼容 q 和 query 两种参数名
+    q = q or query
 
-    if not q.strip():
+    if not q or not q.strip():
         return SearchResponse(
             status="error",
             message="查询文本不能为空",
         )
+
+    logger.info(f"收到知识库检索请求: query='{q[:50]}...', top_k={top_k}")
 
     retriever = SemanticRetriever()
     result = retriever.search(query=q, top_k=top_k)

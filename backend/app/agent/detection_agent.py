@@ -10,12 +10,100 @@
   from app.agent.detection_agent import detection_agent
   result = await detection_agent.chat("检测这张图片", history=[...])
 """
+import json
 from typing import AsyncGenerator, Optional
 
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
+
+# ── Monkey-patch: 修复 _convert_message_to_dict 中 tool_calls 的 function.arguments=None 问题 ──
+# 原因：LangChain AgentExecutor 在二次 LLM 调用时，消息历史中的 AIMessage.tool_calls
+# 可能携带 function.arguments=None，导致 OpenAI API 返回 400 参数校验错误。
+# 通过 monkey-patch _convert_message_to_dict 确保所有 LLM 调用路径（_agenerate、
+# _astream、_stream 等）都经过修复。
+import langchain_openai.chat_models.base as _lc_base
+_original_convert_message = _lc_base._convert_message_to_dict
+
+def _patched_convert_message_to_dict(message):
+    """修复版消息转换：确保 tool_calls 中 function.arguments 不为 None"""
+    result = _original_convert_message(message)
+    # 修复 tool_calls 中的 function.arguments
+    if "tool_calls" in result:
+        for tc in result["tool_calls"]:
+            if isinstance(tc, dict):
+                func = tc.get("function", {})
+                if isinstance(func, dict) and func.get("arguments") is None:
+                    func["arguments"] = "{}"
+    return result
+
+_lc_base._convert_message_to_dict = _patched_convert_message_to_dict
+
+
+class SafeArgumentsChatOpenAI(ChatOpenAI):
+    """
+    ChatOpenAI 安全子类：修复 tool_calls 中 function.arguments 为 None 导致 LLM API 400 错误的问题。
+
+    背景：LangChain 的 AgentExecutor 在构造第二轮 LLM 请求时，消息历史中
+    的 tool_call 消息可能包含 function.arguments=None，LLM API 要求该字段
+    必须是有效 JSON 字符串，否则返回 400 错误。
+    """
+
+    @staticmethod
+    def _fix_none_arguments(messages):
+        """遍历消息列表，修复 tool_calls 中 function.arguments 为 None 的情况
+
+        LangChain 在构造第二轮 LLM 请求时，消息历史中的 AIMessage.tool_calls
+        可能包含 function.arguments=None，导致 OpenAI API 返回 400 参数校验错误。
+        此方法在消息发送到 LLM API 前修复 None 为有效 JSON 字符串 "{}"。
+        """
+        import json as _json
+        for msg in messages:
+            tool_calls = getattr(msg, "tool_calls", None)
+            if not tool_calls:
+                continue
+            for tc in tool_calls:
+                # 处理对象格式：tc.function.arguments 为 None 或空
+                if hasattr(tc, "function"):
+                    func = tc.function
+                    if hasattr(func, "arguments"):
+                        if func.arguments is None:
+                            func.arguments = "{}"
+                        elif isinstance(func.arguments, dict):
+                            # 某些情况下 arguments 可能是 dict 而非 JSON 字符串
+                            func.arguments = _json.dumps(func.arguments)
+                    # 同步修复 args 字段（LangChain 内部使用）
+                    if hasattr(tc, "args") and (tc.args is None or tc.args == {}):
+                        tc.args = {}
+                # 处理 dict 格式
+                elif isinstance(tc, dict):
+                    func = tc.get("function", {})
+                    if isinstance(func, dict):
+                        if func.get("arguments") is None:
+                            func["arguments"] = "{}"
+                        elif isinstance(func.get("arguments"), dict):
+                            func["arguments"] = _json.dumps(func["arguments"])
+                    # 同步修复 args 字段
+                    if tc.get("args") is None:
+                        tc["args"] = {}
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        """重写异步生成方法，在发送到 LLM API 前修复 function.arguments"""
+        self._fix_none_arguments(messages)
+        return await super()._agenerate(messages, stop, run_manager, **kwargs)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        """重写同步生成方法"""
+        self._fix_none_arguments(messages)
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        """重写异步流式方法（astream_events 的底层调用路径），在发送前修复 function.arguments"""
+        self._fix_none_arguments(messages)
+        async for chunk in super()._astream(messages, stop, run_manager, **kwargs):
+            yield chunk
+
 
 from app.agent.prompts import DETECTION_AGENT_SYSTEM_PROMPT
 from app.config.settings import settings
@@ -65,7 +153,7 @@ class DetectionAgent:
                 return
 
             if settings.USE_LOCAL_LLM:
-                self.llm = ChatOpenAI(
+                self.llm = SafeArgumentsChatOpenAI(
                     model=settings.OLLAMA_MODEL,
                     api_key="ollama",
                     base_url=settings.OLLAMA_BASE_URL,
@@ -73,7 +161,7 @@ class DetectionAgent:
                     max_tokens=2000,
                 )
             else:
-                self.llm = ChatOpenAI(
+                self.llm = SafeArgumentsChatOpenAI(
                     model=settings.QWEN_MODEL,
                     api_key=settings.QWEN_API_KEY,
                     base_url=settings.QWEN_BASE_URL,
@@ -177,6 +265,14 @@ class DetectionAgent:
 
                 if event_kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
+                    # BUG-001: 修复 tool_calls 中 function.arguments 为 None 导致 LLM API 400 错误
+                    if hasattr(chunk, "tool_calls") and chunk.tool_calls:
+                        for tc in chunk.tool_calls:
+                            if isinstance(tc, dict):
+                                if "function" in tc and tc["function"].get("arguments") is None:
+                                    tc["function"]["arguments"] = "{}"
+                                if "args" in tc and tc["args"] is None:
+                                    tc["args"] = {}
                     if hasattr(chunk, "content") and chunk.content:
                         yield {"type": "text_chunk", "content": chunk.content}
 
@@ -198,7 +294,7 @@ class DetectionAgent:
                     yield {
                         "type": "tool_result",
                         "tool": tool_name,
-                        "result": str(tool_output)[:500] if tool_output else "",
+                        "result": str(tool_output) if tool_output else "",
                     }
 
         except Exception as e:

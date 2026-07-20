@@ -12,6 +12,10 @@ import request from "@/utils/request";
  * @returns {Promise} - 检测结果（标注图 + 目标统计）
  */
 export async function detectSingle(formData, sceneId = 1) {
+  // 参数校验：必须包含 file 字段
+  if (!formData.has("file")) {
+    throw new Error("单图检测失败：缺少图片文件，请选择图片后重试")
+  }
   // 后端要求 scene_id 为 Form 字段，追加到 FormData
   if (!formData.has("scene_id")) {
     formData.append("scene_id", sceneId);
@@ -29,6 +33,11 @@ export async function detectSingle(formData, sceneId = 1) {
  * @returns {Promise} - 批量检测结果
  */
 export async function detectBatch(formData, sceneId = 1) {
+  // 参数校验：必须包含至少一个 files
+  const batchFiles = formData.getAll("files")
+  if (!batchFiles || batchFiles.length === 0) {
+    throw new Error("批量检测失败：缺少图片文件，请选择图片后重试")
+  }
   if (!formData.has("scene_id")) {
     formData.append("scene_id", sceneId);
   }
@@ -44,6 +53,10 @@ export async function detectBatch(formData, sceneId = 1) {
  * @returns {Promise} - ZIP 解压后的批量检测结果
  */
 export async function detectZip(formData, sceneId = 1) {
+  // 参数校验：必须包含 file 字段
+  if (!formData.has("file")) {
+    throw new Error("ZIP 检测失败：缺少 ZIP 文件，请选择文件后重试")
+  }
   if (!formData.has("scene_id")) {
     formData.append("scene_id", sceneId);
   }
@@ -68,6 +81,10 @@ export function getDetectionStatus(taskId) {
  * @returns {Promise} - { task_id, status, message }
  */
 export function detectVideo(formData, sceneId = 1) {
+  // 参数校验：必须包含 file 字段
+  if (!formData.has("file")) {
+    throw new Error("视频检测失败：缺少视频文件，请选择视频后重试")
+  }
   if (!formData.has("scene_id")) {
     formData.append("scene_id", sceneId);
   }

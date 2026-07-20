@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from datetime import datetime
 from io import BytesIO
 from typing import Annotated, Any, List, Optional
 
@@ -14,6 +15,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -40,6 +42,8 @@ logger = get_logger(__name__)
 
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+# 允许的图像文件扩展名白名单（防止非图像文件被传入检测接口）
+ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "webp", "tiff"}
 MAX_VIDEO_BYTES = 500 * 1024 * 1024
 router = APIRouter(prefix="/api/detection", tags=["detection"])
 
@@ -260,6 +264,13 @@ async def detect_single(
     """单图检测：上传一张图片，检测火焰和烟雾"""
     try:
         image_bytes = await file.read()
+        # 校验文件类型：拒绝非图像文件上传
+        ext = (file.filename or "").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else ""
+        if ext not in ALLOWED_IMAGE_EXTENSIONS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"不支持的文件类型 '.{ext}'，请上传 jpg/jpeg/png/bmp/webp/tiff 格式的图片",
+            )
         if len(image_bytes) > MAX_IMAGE_BYTES:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -293,6 +304,8 @@ async def detect_single(
                 },
             },
         }
+    except HTTPException:
+        raise  # 直接透传 HTTPException（如文件类型校验、场景不存在等），避免被通用异常捕获
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -317,6 +330,13 @@ async def detect_batch(
         image_files = []
         for f in files:
             data = await f.read()
+            # 校验文件类型：拒绝非图像文件上传
+            ext = (f.filename or "").rsplit(".", 1)[-1].lower() if "." in (f.filename or "") else ""
+            if ext not in ALLOWED_IMAGE_EXTENSIONS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"不支持的文件类型 '.{ext}'，请上传 jpg/jpeg/png/bmp/webp/tiff 格式的图片",
+                )
             if len(data) > MAX_IMAGE_BYTES:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -352,6 +372,8 @@ async def detect_batch(
                 ],
             },
         }
+    except HTTPException:
+        raise  # 直接透传 HTTPException
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"批量检测失败: {str(e)}")
 
@@ -398,6 +420,8 @@ async def detect_video(
                 "annotated_url": task.annotated_url,
             },
         }
+    except HTTPException:
+        raise  # 直接透传 HTTPException
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"视频检测失败: {str(e)}")
 
@@ -433,6 +457,28 @@ async def detect_zip(
                 detail=f"ZIP 文件超过最大限制 ({settings.ZIP_MAX_SIZE_MB} MB)",
             )
 
+        # 校验 ZIP 内文件类型：拒绝包含非图像文件的 ZIP 包
+        import zipfile
+        from pathlib import Path
+        with zipfile.ZipFile(BytesIO(zip_bytes), "r") as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                # 处理中文编码
+                try:
+                    inner_name = info.filename.encode("cp437").decode("gbk")
+                except (UnicodeDecodeError, UnicodeEncodeError):
+                    try:
+                        inner_name = info.filename.encode("cp437").decode("utf-8")
+                    except (UnicodeDecodeError, UnicodeEncodeError):
+                        inner_name = info.filename
+                ext = Path(inner_name).suffix.lstrip(".").lower()
+                if ext and ext not in ALLOWED_IMAGE_EXTENSIONS:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"ZIP 包内包含不支持的文件类型 '.{ext}'（{inner_name}），请确保所有文件均为 jpg/jpeg/png/bmp/webp/tiff 格式的图片",
+                    )
+
         # 调用检测服务
         tasks = await asyncio.to_thread(
             detection_service.detect_zip,
@@ -463,10 +509,41 @@ async def detect_zip(
                 ],
             },
         }
+    except HTTPException:
+        raise  # 直接透传 HTTPException
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"ZIP 检测失败: {str(e)}")
+
+
+@router.get("/tasks/list")
+def get_detection_tasks_list(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    fire_level: Optional[str] = Query(None, description="火情等级筛选"),
+    file_name: Optional[str] = Query(None, description="文件名搜索"),
+    start_time: Optional[datetime] = Query(None, description="开始时间"),
+    end_time: Optional[datetime] = Query(None, description="结束时间"),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """分页查询检测任务列表
+
+    注意：此端点为向后兼容保留，内部直接委托给 history_service.get_tasks()。
+    建议前端统一使用 GET /api/history/tasks 端点。
+    """
+    result = history_service.get_tasks(
+        db=db,
+        user_id=current_user.id,
+        page=page,
+        page_size=page_size,
+        fire_level=fire_level,
+        file_name=file_name,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    return {"code": 200, "message": "success", "data": result}
 
 
 @router.get("/tasks/{task_id}")

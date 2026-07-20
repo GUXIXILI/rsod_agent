@@ -19,9 +19,9 @@
             </div>
           </template>
 
-          <el-descriptions :column="1" border size="default" v-if="profile.username">
+          <el-descriptions :column="1" border size="default" v-if="profile.id">
             <el-descriptions-item label="用户名">
-              {{ profile.username }}
+              {{ profile.username || '-' }}
             </el-descriptions-item>
             <el-descriptions-item label="邮箱">
               {{ profile.email || '-' }}
@@ -31,7 +31,7 @@
             </el-descriptions-item>
             <el-descriptions-item label="账户状态">
               <el-tag size="small" :type="profile.status === 'active' ? 'success' : 'warning'">
-                {{ profile.status === 'active' ? '正常' : (profile.status || '未知') }}
+                {{ profile.status === 'active' ? '正常' : '已禁用' }}
               </el-tag>
             </el-descriptions-item>
             <el-descriptions-item label="注册时间">
@@ -175,8 +175,37 @@ async function fetchProfile() {
   profileLoading.value = true;
   try {
     const res = await request.get("/user/profile");
-    // 响应拦截器已解包 response.data
-    profile.value = res.data || res;
+    console.log('[SettingsPage] fetchProfile raw response:', JSON.stringify(res))
+    // 响应拦截器返回 response.data（即 HTTP 响应体 JSON）
+    // 后端返回格式：{code: 200, message: "success", data: {username, email, is_active, ...}}
+    // 兼容两种场景：res.data 可能是后端包装的 data 字段，也可能 res 本身就是用户对象
+    let userData = null;
+    if (res && typeof res === "object") {
+      if (res.data && typeof res.data === "object" && res.data.username !== undefined) {
+        // 后端包装格式：{code, message, data: {username, ...}}
+        userData = res.data;
+      } else if (res.username !== undefined) {
+        // 已经解包的用户对象：{username, ...}
+        userData = res;
+      }
+    }
+    if (userData) {
+      // 将后端字段映射为前端模板需要的字段名
+      profile.value = {
+        username: userData.username || "",
+        email: userData.email || "",
+        role: (userData.roles && userData.roles.length > 0) ? userData.roles[0] : (userData.role || ""),
+        status: userData.is_active ? "active" : "inactive",
+        created_at: userData.created_at || "",
+        id: userData.id || "",
+        phone: userData.phone || "",
+        avatar: userData.avatar || "",
+      };
+      console.log('[SettingsPage] profile set:', JSON.stringify(profile.value))
+    } else {
+      profile.value = {};
+      console.log('[SettingsPage] profile set (empty): userData was null/undefined')
+    }
   } catch (e) {
     ElMessage.error("获取个人信息失败");
   } finally {
@@ -230,6 +259,16 @@ onMounted(() => {
 <style scoped>
 .settings-page {
   padding: 20px;
+  
+  /* Overrides for Element Plus primary colors (replaces default blue/light blue) */
+  /* 覆盖 Element Plus 默认主色调（将蓝色和浅蓝色替换为自定义颜色） */
+  --el-color-primary: #a9a6a2;
+  --el-color-primary-light-3: #b8bcb9;
+  --el-color-primary-light-5: #dcc9b7; 
+  --el-color-primary-light-7: #e9dbce;
+  --el-color-primary-light-8: #efe5da;
+  --el-color-primary-light-9: #f6eee5;
+  --el-color-primary-dark-2: #878581;
 }
 
 .page-header {
