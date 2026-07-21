@@ -245,6 +245,7 @@ class DetectionService:
         iou_threshold: float = 0.45,
         image_size: int = 640,
         frame_skip: int = 5,
+        progress_task_id: Optional[int] = None,
     ) -> DetectionTask:
         """视频检测：逐帧检测，支持跳帧
 
@@ -280,11 +281,18 @@ class DetectionService:
                 original_url=video_url,
                 annotated_url=None,
                 status="processing",
+                progress=0,
                 detected_at=datetime.now(),
             )
             own_db.add(task)
             own_db.commit()
             own_db.refresh(task)
+            owner_task_id = progress_task_id or task.id
+            if owner_task_id != task.id:
+                owner_task = own_db.query(DetectionTask).filter(DetectionTask.id == owner_task_id).first()
+                if owner_task is not None:
+                    owner_task.progress = 0
+                    own_db.commit()
 
             fps = 0.0
             total_frames = 0
@@ -294,6 +302,7 @@ class DetectionService:
             smoke_frames: List[int] = []
             total_fire_count = 0
             total_smoke_count = 0
+            last_persisted_progress = -1
 
             try:
                 cap = cv2.VideoCapture(str(temp_path))
@@ -310,7 +319,7 @@ class DetectionService:
                         db=settings.REDIS_DB, decode_responses=True,
                     )
                     redis_client.set(
-                        f"video:progress:{task.id}",
+                        f"video:progress:{owner_task_id}",
                         json.dumps({"progress": 0, "current_frame": 0, "total_frames": total_frames}),
                         ex=3600,
                     )
@@ -345,14 +354,15 @@ class DetectionService:
                             smoke_frames.append(frame_idx)
                             total_smoke_count += 1
 
-                    # 更新 Redis 进度
+                    current_frame = frame_idx
+                    progress = int((current_frame / max(total_frames, 1)) * 100)
+                    # Redis 提供实时进度，数据库用于 Redis 缺失或进程重启后的回退。
                     if redis_client:
-                        current_frame = frame_idx
                         try:
                             redis_client.set(
-                                f"video:progress:{task.id}",
+                                f"video:progress:{owner_task_id}",
                                 json.dumps({
-                                    "progress": int((current_frame / total_frames) * 100),
+                                    "progress": progress,
                                     "current_frame": current_frame,
                                     "total_frames": total_frames,
                                 }),
@@ -360,6 +370,17 @@ class DetectionService:
                             )
                         except Exception:
                             pass
+
+                    if progress >= last_persisted_progress + 5:
+                        task.progress = progress
+                        if owner_task_id != task.id:
+                            owner_task = own_db.query(DetectionTask).filter(
+                                DetectionTask.id == owner_task_id
+                            ).first()
+                            if owner_task is not None:
+                                owner_task.progress = progress
+                        own_db.commit()
+                        last_persisted_progress = progress
 
                 cap.release()
                 out.release()
@@ -390,6 +411,7 @@ class DetectionService:
             # 更新任务为已完成状态
             task.annotated_url = output_url
             task.status = "completed"
+            task.progress = 100
             task.image_width = width
             task.image_height = height
             task.video_duration = total_frames / fps if fps > 0 else 0
@@ -399,13 +421,17 @@ class DetectionService:
             task.smoke_area = fire_level_result["smoke_area"]
             task.fire_object_count = total_fire_count
             task.smoke_object_count = total_smoke_count
+            if owner_task_id != task.id:
+                owner_task = own_db.query(DetectionTask).filter(DetectionTask.id == owner_task_id).first()
+                if owner_task is not None:
+                    owner_task.progress = 100
             own_db.commit()
             own_db.refresh(task)
 
             # 清理 Redis 进度 key
             if redis_client:
                 try:
-                    redis_client.delete(f"video:progress:{task.id}")
+                    redis_client.delete(f"video:progress:{owner_task_id}")
                 except Exception:
                     pass
 
@@ -418,6 +444,30 @@ class DetectionService:
                 task.id, total_frames, len(fire_frames), len(smoke_frames),
             )
             return task
+        except Exception as error:
+            if "task" in locals():
+                try:
+                    task.status = "failed"
+                    task.error_message = str(error)
+                    task.completed_at = datetime.now()
+                    if "owner_task_id" in locals() and owner_task_id != task.id:
+                        owner_task = own_db.query(DetectionTask).filter(
+                            DetectionTask.id == owner_task_id
+                        ).first()
+                        if owner_task is not None:
+                            owner_task.status = "failed"
+                            owner_task.error_message = str(error)
+                            owner_task.completed_at = datetime.now()
+                    own_db.commit()
+                except Exception:
+                    own_db.rollback()
+                    logger.exception("视频检测失败状态写入失败")
+            if "redis_client" in locals() and redis_client:
+                try:
+                    redis_client.delete(f"video:progress:{owner_task_id}")
+                except Exception:
+                    pass
+            raise
         finally:
             own_db.close()
 

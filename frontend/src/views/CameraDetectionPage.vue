@@ -218,6 +218,10 @@ const canvasHeight = ref(480);
 // WebSocket
 let ws = null;
 let mediaStream = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let shouldReconnect = false;
+const MAX_RECONNECT_DELAY_MS = 10000;
 
 // ── 计算属性 ──
 const statusText = computed(() => {
@@ -244,6 +248,7 @@ const classDistribution = computed(() => {
 async function startCamera() {
   try {
     isConnecting.value = true;
+    shouldReconnect = true;
 
     // 1. 获取摄像头权限
     mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -272,23 +277,29 @@ async function startCamera() {
     console.error("[摄像头开启失败]", err);
     ElMessage.error(`摄像头开启失败: ${err.message}`);
     isConnecting.value = false;
+    shouldReconnect = false;
   }
 }
 
 /** 建立 WebSocket 连接 */
 function connectWebSocket() {
+  if (ws && [WebSocket.CONNECTING, WebSocket.OPEN].includes(ws.readyState)) return;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   // 构造 WebSocket URL
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host; // 开发环境通过 Vite proxy 转发
-  const wsUrl = `${protocol}//${host}/api/detection/camera`;
-
-  // 获取 Token
   const token = localStorage.getItem("rsod_token");
+  const wsUrl = `${protocol}//${host}/api/detection/camera?token=${token}`;
 
   ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
       console.log("[WebSocket] 连接已建立");
+      isConnecting.value = false;
+      reconnectAttempts = 0;
 
       ws.send(
         JSON.stringify({
@@ -302,6 +313,13 @@ function connectWebSocket() {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
+
+      if (data.type === "ping") {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "pong", timestamp: data.timestamp }));
+        }
+        return;
+      }
 
       if (data.type === "result") {
         // 收到标注帧
@@ -327,13 +345,23 @@ function connectWebSocket() {
 
   ws.onclose = () => {
     console.log("[WebSocket] 连接已关闭");
-    isConnecting.value = false;
+    ws = null;
+    if (!shouldReconnect || !mediaStream) {
+      isConnecting.value = false;
+      return;
+    }
+    isConnecting.value = true;
+    const delay = Math.min(1000 * (2 ** reconnectAttempts), MAX_RECONNECT_DELAY_MS);
+    reconnectAttempts += 1;
+    ElMessage.warning(`摄像头连接中断，${Math.round(delay / 1000)} 秒后自动重连`);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectWebSocket();
+    }, delay);
   };
 
   ws.onerror = (err) => {
     console.error("[WebSocket] 连接错误:", err);
-    ElMessage.error("WebSocket 连接失败，请检查后端服务");
-    isConnecting.value = false;
   };
 }
 
@@ -384,6 +412,12 @@ function renderAnnotatedFrame(annotatedBase64) {
 
 /** 停止摄像头 */
 function stopCamera() {
+  shouldReconnect = false;
+  reconnectAttempts = 0;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   // 关闭 WebSocket
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "close" }));
