@@ -1,0 +1,94 @@
+// ============================================================
+// 全局样式入口
+// 引入 reset 样式，并定义项目通用工具类
+// 所有样式变量均来自 variables.scss（通过 vite 自动注入）
+// ============================================================
+
+@use './reset.scss';
+
+// ============================================================
+// 页面容器
+// ============================================================
+
+.page-container {
+  padding: $spacing-lg;
+  background-color: $bg-page;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+// ============================================================
+// 卡片容器
+// ============================================================
+
+.card-container {
+  background-color: $bg-white;
+  border-radius: $border-radius-md;
+  box-shadow: $box-shadow-light;
+  padding: $spacing-md;
+  transition: box-shadow $transition-base;
+
+  &:hover {
+    box-shadow: $box-shadow-base;
+  }
+}
+
+// ============================================================
+// 弹性布局 - 居中
+// ============================================================
+
+.flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+// ============================================================
+// 弹性布局 - 两端对齐
+// ============================================================
+
+.flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+// ============================================================
+// 文字溢出省略
+// ============================================================
+
+.text-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// ============================================================
+// 自定义细滚动条
+// ============================================================
+
+.scrollbar-thin {
+  // Firefox 细滚动条
+  scrollbar-width: thin;
+  scrollbar-color: #C8C0B8 transparent;
+
+  // WebKit 细滚动条
+  &::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 2px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background-color: #C8C0B8;
+    border-radius: 2px;
+
+    &:hover {
+      background-color: #A09890;
+    }
+  }
+}
